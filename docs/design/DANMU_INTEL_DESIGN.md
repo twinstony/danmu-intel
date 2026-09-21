@@ -95,27 +95,146 @@ P5 可观测：每个节点记录四段时间戳 + LLM usage + 成本
 
 ### 3.1 采集层（capture）
 
-**职责**：多路直播间弹幕流采集，独立落盘，异常自动重启。
+**职责**：多路多平台直播间弹幕流采集，独立落盘，异常自动重启。管理员通过 Web 后台完成数据源配置。
 
-#### 3.1.1 实现设计
+#### 3.1.0 用户角色与鉴权
+
+| 角色 | 说明 | 权限范围 |
+|---|---|---|
+| `viewer` | 未登录访客 | 只读访问免费内容（赛后复盘） |
+| `user` | 订阅用户 | 只读访问 Pro 内容、个人订阅管理 |
+| `admin` | 管理员 | 后台管理（数据源配置、用户管理、系统设置） |
+
+- **鉴权方式**：Session Token（Web UI）+ API Key（程序调用）
+- **后台路径**：前缀 `/admin/*`，中间件校验 `role == admin`，否则 403
+- **首个管理员**：环境变量 `DANMU_INTEL_ADMIN_TOKEN` 注册的首个账户自动获 admin 角色
+
+#### 3.1.1 数据源配置管理（后台 CRUD）
+
+**核心原则：管理员通过 Web 后台完成数据源配置，不直接编辑配置文件。**
 
 | 组件 | 实现 |
 |---|---|
-| 数据源 | 虎牙（官方流/957/毛毛/米勒等）、SOOP（LCK CL）；注册表驱动（`config/streamers.json`） |
+| 配置存储 | DB 表 `sources`（替代原 `config/streamers.json`） |
+| Web 管理页 | `GET /admin/sources`：列表 + 增删改查直播平台、房间、赛程关联 |
+| 热更新 | 配置变更写入 DB → 推送到采集调度器 → 下个采集周期（≤60s）生效 |
+| API | REST：`GET/POST/PUT/DELETE /api/admin/sources`（需 admin token） |
+
+**数据源实体**（DB 表 `sources`）：
+
+| 字段 | 类型 | 说明 |
+|---|---|---|
+| `id` | int PK | 自增 |
+| `platform` | enum | huya / douyu / bilibili / soop / kick / twitch |
+| `source_name` | str | 展示名（如「虎牙-官方流」） |
+| `room_url` | str | 房间 URL |
+| `room_id` | str | 平台唯一标识 |
+| `league_id` | str FK | 关联联赛（`leagues.id`） |
+| `is_active` | bool | 是否启用 |
+| `priority` | int | 同场多源时的主次优先级（0=主） |
+| `created_at` | datetime | 创建时间 |
+| `updated_at` | datetime | 最后修改 |
+
+#### 3.1.2 多平台适配器架构
+
+**核心抽象**：每个直播平台一个适配器，统一事件输出接口。
+
+```python
+class DanmuAdapter(ABC):
+    """弹幕平台适配器基类。"""
+    
+    @abstractmethod
+    async def connect(self, room_url: str) -> None:
+        """建立 WebSocket 连接。"""
+        ...
+    
+    @abstractmethod
+    async def listen(self) -> AsyncIterator[DanmuMessage]:
+        """产出标准化弹幕流。"""
+        ...
+    
+    @abstractmethod
+    async def disconnect(self) -> None:
+        """断开连接。"""
+        ...
+
+class DanmuMessage(TypedDict):
+    """统一弹幕事件模型。"""
+    platform: str       # huya / soop / kick / ...
+    room_id: str
+    user_id: str
+    username: str
+    content: str
+    timestamp: int      # ms
+```
+
+**适配器注册表**：
+
+| 适配器类 | 平台 | 实现基础 |
+|---|---|---|
+| `HuyaAdapter` | 虎牙 | `vendor/real-url_danmu/danmaku/huya.py` |
+| `DouyuAdapter` | 斗鱼 | `vendor/real-url_danmu/danmaku/douyu.py` |
+| `BilibiliAdapter` | B 站 | `vendor/real-url_danmu/danmaku/bilibili.py` |
+| `SOOPAdapter` | SOOP（原 AfreecaTV） | 蓝本 `tools/fetch_soop_danmu.py` 协议 |
+| `KICKAdapter` | KICK | 新增（WebSocket IRC 协议） |
+| `TwitchAdapter` | Twitch | 新增（IRC over WebSocket） |
+
+**扩展性**：新增平台只需实现 `DanmuAdapter` 接口并在注册表登记一行代码，调度逻辑无需改动。
+
+**采集调度**：同一场比赛可注册多个数据源（不同平台/房间），每个源独立 `asyncio.Task`，共享同一 `match_id`，落盘时合并。
+
+#### 3.1.3 直播间发现机制
+
+| 发现方式 | 说明 | 触发条件 | 优先级 |
+|---|---|---|---|
+| **手动配置** | 管理员在后台填写房间 URL | 随时 | 最高 |
+| **赛程联动** | 赛程 API 检测到比赛时，自动调用平台搜索 API 发现房间 | 每日赛程同步后 | 中 |
+| **房间池预注册** | 管理员提前配置「常用主播池」，采集器按赛程自动匹配已开播的房间 | 比赛开始前 30 min | 最低 |
+
+**去重规则**：手动配置优先；赛程联动发现的房间若与手动配置 `room_id` 重合则跳过；房间池仅在所有手动源均离线时启用。
+
+#### 3.1.4 采集起止时机
+
+| 阶段 | 触发条件 | 行为 |
+|---|---|---|
+| **准备期** | 赛程 API 检测到比赛（赛前 30 min） | 初始化采集会话、预检各源连接状态、通知管理员「即将采集」 |
+| **开始采集** | 官方开播事件（优先）**或** 任意已配置源弹幕密度 > 5条/10s（备选） | 启动所有已配置采集 Task，记录 `started_at` |
+| **采集进行中** | 比赛中 | 持续采集 + 心跳监测（每 30s 心跳）+ 断线自动重连 |
+| **停止采集** | 终局四信号齐备 **或** 所有源心跳超时 ≥5 min（比赛已结束但遗漏信号） | 落盘收尾、生成采集元数据、记录 `stopped_at` |
+| **手动干预** | 管理员在后台点击「立即开始/停止」 | 覆盖自动逻辑，最高优先级 |
+
+**容错**：
+- 单个房间断线不影响其他房间
+- 全断 60s 无恢复 → 告警
+- 终局信号发出但仍有房间在播 → 宽限 3 min 后强制收尾（标注 `force_stopped`）
+
+#### 3.1.5 实现设计（技术细节）
+
+| 组件 | 实现 |
+|---|---|
+| 数据源 | 多平台（虎牙/斗鱼/B站/SOOP/KICK/Twitch）；注册表驱动（DB 表 `sources`） |
 | 采集器 | 每个直播间一个 `asyncio.Task`，独立 `last_message_at` 心跳 |
-| 会话管理 | 同场比赛所有直播间放入同一 `session_id`（`config/leagues.json` 定义归属） |
+| 会话管理 | 同场比赛所有直播间放入同一 `session_id`（`match_id` 派生） |
 | 落盘 | 原始弹幕 JSONL，路径 `data/capture/<platform>/<date>_<room_id>.jsonl`，**只增不改** |
-| 健康检查 | 心跳超 120s 判假死 → TG 告警 + 自动重启该房间任务 |
-| 去重 | 同一房间（如 maxixi 与 CSBOY 官方房）按 `room_id` 去重 |
+| 健康检查 | 心跳超 120s 判假死 → 告警 + 自动重启该房间任务 |
+| 去重 | 同一场比赛的多源按 `(platform, room_id)` 联合去重 |
 | 完整性标注 | 每场情报标注 `actual_sources` / `expected_sources` / `gaps`；离线房间标 `"offline_not_captured"` |
 
-#### 3.1.2 验收标准
+#### 3.1.6 验收标准
 
+- [ ] 管理员可通过 Web 后台完成数据源增删改查，无需改配置文件
+- [ ] 后台管理页仅 admin 可访问（viewer/user 访问返回 403）
+- [ ] 新增/停用房间配置热生效（≤60s 内无需重启服务）
+- [ ] 同场比赛支持 ≥3 个不同平台直播间同时采集
+- [ ] 新增平台只需实现一个 Adapter 类（不改动调度逻辑）
+- [ ] 赛程联动发现房间成功率 ≥80%（需平台 API 支持）
+- [ ] 官方开播信号后 30s 内自动启动采集
+- [ ] 终局信号后 3 min 内完成收尾落盘
+- [ ] 单房间断线不影响其他房间采集
 - [ ] 比赛开播后 1 分钟内开始采集
 - [ ] 断线自动重连 ≤60s
-- [ ] 任一房间数据中断有日志 + TG 告警
+- [ ] 任一房间数据中断有日志 + 告警
 - [ ] 采集元数据（房间/起止/条数/缺口）落盘
-- [ ] 新增/停用房间改配置热生效（无需重启服务）
 
 ---
 
@@ -545,10 +664,12 @@ payment:
 | Entity | team/player 画像：提及量, 正负锚, 灰信号记录, BP 战绩 |
 | IntelAsset | 主题, 维度, 洞察, 证据, 置信, 验证状态, 时间 |
 | Knowledge | 四维知识：选手/队伍/英雄/联赛 |
-| PaymentAddress | user_id, chain, address, address_index, reference |
-| Payment | user_id, chain, tx_hash, log_index, amount, status |
-| Subscription | user_id, plan, status, started_at, expires_at, payment_id |
-| Member | identifier(TG/QQ), plan, expires, source |
+|| PaymentAddress | user_id, chain, address, address_index, reference |
+|| Payment | user_id, chain, tx_hash, log_index, amount, status |
+|| Subscription | user_id, plan, status, started_at, expires_at, payment_id |
+|| Member | identifier(TG/QQ), plan, expires, source |
+|| Source | id, platform, source_name, room_url, room_id, league_id, is_active, priority, created_at, updated_at |
+|| User | id, role(viewer/user/admin), subscription_ref, created_at |
 
 ### 4.2 存储约定
 
@@ -556,9 +677,10 @@ payment:
 - 切片 JSONL：`match_slug_g{game>_<phase>` 命名
 - 规则层 intel.json：与切片一一对应
 - 状态文件：幂等（存在即跳过）
-- SQLite：结构化库（matches/teams/players/gray/bp/leagues/knowledge/assets/payments/subscriptions）
+- SQLite：结构化库（matches/teams/players/gray/bp/leagues/knowledge/assets/payments/subscriptions/**sources/users**）
 - JSONL/JSON：切片与状态
 - MD：知识库与镜像
+- 后台管理员配置通过 Web UI 写入 DB（`sources`、`users` 表），不读本地 config
 
 ### 4.3 目录结构（目标工程）
 
