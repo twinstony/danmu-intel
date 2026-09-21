@@ -749,33 +749,58 @@ python -m danmu_intel.publish deploy --check
 
 ## 9. 测试与回归
 
-### 9.1 回归测试清单
+### 9.0 覆盖策略（强制要求）
 
-| 测试 | 锁定行为 |
+| 维度 | 要求 |
 |---|---|
-| test_scan_regression | 扫描/抓取空结果自检 |
-| test_match_state_guard | 四道闸：刚开赛误判/仅弹幕定胜负/反讽/比分源滞后 |
-| test_slice_league_isolate | 跨联赛混源 = 0 |
-| test_node_window | 节点切片边界与官方 schedule 一致 |
-| test_intel_schema | 规则层 intel.json 字段固定 |
-| test_render_sections | A 型 0-10 / B 型 0-11 每段恰好一次 |
-| test_ot_rules | CS2 加时制参数化 |
-| test_danmu_premature_end | 弹幕提前喊话不判终局 |
-| test_official_lag | 官方页滞后快照不阻塞 |
-| test_paywall_free | 比赛结束后该场节点页自动转免费 |
-| test_library_idempotent | 沉淀引擎同场不重复入库 |
-| test_verify_member | 会员验证（陌生拒绝/订阅解锁/过期失效） |
-| ★ test_payment_address_derivation | 地址派生幂等（同用户同链始终返回同一地址） |
-| ★ test_payment_watcher | 模拟入账事件 → 检测 → 匹配 → 开通 |
-| ★ test_payment_idempotent | 同一 tx 不重复开通 |
-| ★ test_payment_underpaid | 金额不足 → 待补款状态 |
-| ★ test_subscription_expire | 到期自动降级 |
+| **整体覆盖率** | **≥ 90%**（语句覆盖率 + 分支覆盖率双达标） |
+| **单元测试（单元层）** | 所有模块业务逻辑 100% 覆盖；含正常路径 + 边界 + 异常路径 |
+| **E2E 浏览器测试** | 关键用户旅程端到端覆盖（Playwright / pytest-playwright）；含注册→付款→解锁→到期全链路 |
+| **测试分层** | 单元（pytest，<1s）→ 集成（pytest + testcontainers，<30s）→ E2E（Playwright，<5min） |
+| **CI 门禁** | 覆盖率 < 90% 时 CI 失败，禁止合并 |
+| **工具** | pytest + pytest-cov + coverage.py + playwright |
+| **数据** | 单元用 mock / fixture；E2E 用测试网（Polygon Mumbai / Solana devnet）+ 浏览器自动化 |
+| **覆盖率报告** | HTML 报告（`htmlcov/`）+ XML（CI 消费）；覆盖率差按模块生成热力图 |
 
-### 9.2 发布门禁
+### 9.1 单元测试清单
+
+| 测试 | 锁定行为 | 类型 |
+|---|---|---|
+| test_scan_regression | 扫描/抓取空结果自检 | 单元 |
+| test_match_state_guard | 四道闸：刚开赛误判/仅弹幕定胜负/反讽/比分源滞后 | 单元 |
+| test_slice_league_isolate | 跨联赛混源 = 0 | 单元 |
+| test_node_window | 节点切片边界与官方 schedule 一致 | 单元 |
+| test_intel_schema | 规则层 intel.json 字段固定 | 单元 |
+| test_render_sections | A 型 0-10 / B 型 0-11 每段恰好一次 | 单元 |
+| test_ot_rules | CS2 加时制参数化 | 单元 |
+| test_danmu_premature_end | 弹幕提前喊话不判终局 | 单元 |
+| test_official_lag | 官方页滞后快照不阻塞 | 单元 |
+| test_paywall_free | 比赛结束后该场节点页自动转免费 | 单元 |
+| test_library_idempotent | 沉淀引擎同场不重复入库 | 单元 |
+| test_verify_member | 会员验证（陌生拒绝/订阅解锁/过期失效） | 单元 |
+| ★ test_payment_address_derivation | 地址派生幂等（同用户同链始终返回同一地址） | 单元 |
+| ★ test_payment_watcher | 模拟入账事件 → 检测 → 匹配 → 开通 | 单元 |
+| ★ test_payment_idempotent | 同一 tx 不重复开通 | 单元 |
+| ★ test_payment_underpaid | 金额不足 → 待补款状态 | 单元 |
+| ★ test_subscription_expire | 到期自动降级 | 单元 |
+
+### 9.2 E2E 浏览器测试清单
+
+| 测试 | 锁定行为 | 浏览器 |
+|---|---|---|
+| ★ e2e_register_select_plan | 注册 → 选档位 → 选链 → 展示专属地址+二维码 | Chromium / Firefox / WebKit |
+| ★ e2e_payment_flow | 模拟入账 → 页面自动解锁（Pro 内容可见） | Chromium |
+| ★ e2e_subscription_expire | 到期 → 自动降级 → Pro 内容隐藏 + 续费提醒 | Chromium |
+| ★ e2e_verify_member_api | /api/verify-member 对已订阅/未订阅/过期返回正确 | Playwright request |
+| ★ e2e_responsive_layout | 情报页在手机/平板/桌面三档响应正确 | 三 viewport |
+| ★ e2e_paywall_toggle | 比赛结束前后 Pro/免费分层自动切换 | Chromium |
+| ★ e2e_idempotent_refresh | 同一用户重复打开订阅页，地址不变 | Chromium |
+
+### 9.3 发布门禁
 
 ```
-pytest 全绿 → 生成页结构门禁 → 事实层官方校准 → 终局四信号 → 全站审计
-→ 支付模块测试全绿 → 发布 → 线上抽查
+pytest 全绿 → 覆盖率 ≥ 90% → 生成页结构门禁 → 事实层官方校准
+→ 终局四信号 → 全站审计 → E2E 通过 → 支付模块测试全绿 → 发布 → 线上抽查
 ```
 
 ---
@@ -812,6 +837,7 @@ pytest 全绿 → 生成页结构门禁 → 事实层官方校准 → 终局四�
 | 12 | 终局防误：任何"比赛结束"发布必经四信号 + 四道闸 | PRD §16.12 |
 | 13 | ★ 支付模块：服务器不持有私钥（xpub 只读） | 本文档 §3.9.1 |
 | 14 | ★ 支付模块：支持 Polygon + Solana 两条链 | 本文档 §3.9.1 |
+| 15 | ★ **测试覆盖 ≥ 90%**：单元测试 + E2E 浏览器测试双层覆盖；CI 门禁低于 90% 禁止合并 | 本文档 §9 |
 
 ---
 

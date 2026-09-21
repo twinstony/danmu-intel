@@ -45,7 +45,7 @@
 | **确认数** | 入账判定门槛：Polygon 3 块；Solana finalized |
 | **待补款** | 入账金额不足时挂起的状态，不自动开通 |
 | **宽限期** | 到期后仍可访问的天数（3 天），超期自动降级免费账号 |
-| **早鸟** | 优惠档位：$39/月、$105/季、$390/年。原定限 20 名或 2026-09-15 截止 |
+| **早鸟** | 优惠档位：$39/月、$105/季、$390/年。早鸟窗口待定义 |
 | **梯度涨价** | 正式订阅每满 20 名整体 +20%，月付封顶 $99、年付封顶 $986；**老用户终身锁价** |
 | **Pro 墙** | 付费墙，只挂两处：进行中的节点情报 + 完整画像。比赛结束 → 该场自动转免费 |
 
@@ -60,8 +60,10 @@
 | 收款链 | **仅 Polygon + Solana**（明确排除 Base） | ADR-0003 |
 | 收款机制 | **唯一充值地址 + watch-only（不持有私钥）** | ADR-0002 |
 | Solana 方案 | 单一收款地址 + 唯一 `reference` 字段（ed25519 硬约束所致） | ADR-0003 |
-| 定价 | 保留现有档位与梯度规则；早鸟窗口需重设（原 2026-09-15 已过期） | 待定 |
-| 收款钱包 | 新建专用收款钱包 | 待定（助记词保管方式） |
+| 定价 | 保留现有档位与梯度规则；早鸟窗口待定义 | ADR-0005 |
+| 收款钱包 | 新建专用收款钱包；助记词用户保管；服务器只配 xpub + Solana 地址 | ADR-0005 |
+| RPC | 使用公共免费节点（Polygon 官方 / Solana 社区公共端点），v1 阶段不做自建 | ADR-0005 |
+| 马斯克打包 | v1 不做，专注单卖 | ADR-0005 |
 | 标签契约 | 5 个规范标签原样使用：`needs-triage` `needs-info` `ready-for-agent` `ready-for-human` `wontfix` | `docs/agents/triage-labels.md` |
 | issue 粒度 | 同一需求尽量写在同一个 issue 里 | — |
 
@@ -75,7 +77,29 @@
 
 ---
 
-## 6. 文档地图
+## 6. USDC 合约地址（查证确认）
+
+| 链 | USDC 类型 | 地址 | 来源 |
+|---|---|---|---|
+| Polygon PoS | 原生 USDC（Circle 官方） | `0x3c499c542cEF5E3811e1192ce70d8cC0c3d5c3359` | MEXC 官方文章 / Circle 官方 |
+| Solana | SPL Token Mint | `EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` | MEXC 官方文章 / Backpack 官方 |
+
+> ⚠️ 注意区分：Polygon 上的 USDC.e（bridged）是 `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174`，**不要搞混**。本项目用原生 USDC。
+
+---
+
+## 7. RPC 节点（v1 公共节点）
+
+| 链 | 端点 | 性质 | 备注 |
+|---|---|---|---|
+| Polygon | `https://polygon-rpc.com` | 官方公共 RPC | 免费，无需 API key，实测延迟 30-40ms |
+| Solana | `https://api.mainnet-beta.solana.com` | 社区公共端点 | 标注"实验用"但 v1 够用；超流量后切换付费备选 |
+
+> 配置中以环境变量 `DANMU_INTEL_POLYGON_RPC` / `DANMU_INTEL_SOLANA_RPC` 注入，可运行时覆盖。
+
+---
+
+## 8. 文档地图
 
 | 文档 | 位置 | 说明 |
 |---|---|---|
@@ -87,10 +111,11 @@
 | 订阅台账 | 蓝本 `docs/task/SUBSCRIPTION_LEDGER.md` | 现有订阅记录（手工维护，待迁移） |
 | 定价 | 蓝本 `docs/task/PRICING_ESPORTS_BUNDLE_2026.md` | 档位与梯度规则 |
 | 模板权威 | 蓝本 `knowledge/INTEL_TEMPLATE_OLD_2026-08-31.md` | 情报页唯一模板标准 |
+| ★ 钱包信息清单 | 本仓库 `docs/payment/wallet-info-checklist.md` | 需要用户提供的字段清单 |
 
 ---
 
-## 7. 环境
+## 9. 环境
 
 - 代理：`http://127.0.0.1:7897`（clone/push/gh 走代理；**不写全局 git 配置**，用 `-c http.proxy=` 一次性传入）
 - 蓝本路径：`~/Workspace/danmu-intel-local`（只读）
