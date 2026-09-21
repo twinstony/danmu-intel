@@ -378,7 +378,7 @@ ADAPTER_REGISTRY = {
 
 ### 5.2 切片层（slice）
 
-**职责**：按节点时间窗切片，联赛源硬隔离。
+**定位**：把「永不改写的原始弹幕流」转成「按比赛 / 小局 / 节点组织的可分析切片」。
 
 > **PRD 原文（§7.3 FR-SLC-1）**：
 > 节点定义：赛前（PRE）、BP 后（BP）、局中（MID）、局末（END）、整场（FULL）、
@@ -389,90 +389,464 @@ ADAPTER_REGISTRY = {
 > 联赛源硬隔离：切片前按 league_files 过滤，CS2 只进 CS 直播间弹幕，LoL 各联赛只进
 >   对应联赛直播间；混源整场作废（void_match_intel）。
 
-#### 5.2.1 节点类型与切片窗口
-
-| 节点 | 标识 | 起点 | 终点 | 说明 |
-|---|---|---|---|---|
-| 赛前 | PRE | 比赛开始 -30min | BP 开始 | 赛前共识、状态核验 |
-| BP 后 | BP | BP 锁定 | 开局 +5min | BP 锚点、选人情报 |
-| 局中 | MID | 开局 +5min | 局末 -5min | 局势、盘口、方向 |
-| 局末 | END | 局末 -5min | 官方 gameWins/closed | 关键节点、结果 |
-| 加时 | OT | 比分超 12:12 | 官方 OT 结束 | CS2 专用 |
-| 整场 | FULL | 比赛开始 -30min | 比赛结束 +10min | 全窗口抽样复盘 |
-
-#### 5.2.2 切片算法步骤
-
-**输入**：
-- `match_slug`：比赛唯一标识（如 `2026-09-21_lck-cl_t1_vs_drx`）
-- `node_type`：节点类型（PRE/BP/MID/END/OT/FULL）
-- `game_no`：小局编号（1/2/3...，FULL 时为 null）
-- `window_start` / `window_end`：时间窗（epoch 秒）
-- `league_files`：联赛对应的原始弹幕文件列表
-
-**步骤**：
-
-1. **联赛过滤**：从 `league_files` 中筛选出当前联赛的弹幕文件
-   - CS2 → 只进 CS 直播间文件（`source LIKE '%cs%'` 或 `league_id IN ('blast','iem','ewc')`）
-   - LoL → 只进对应联赛文件（`league_id = 'lck-cl'`）
-   - 混源检测：如果切片结果包含非本联赛文件 → `void_match_intel`
-
-2. **时间窗过滤**：遍历所有原始弹幕 JSONL 文件，筛选 `window_start <= ts <= window_end` 的弹幕
-
-3. **去重排序**：按 `ts` 升序排序，同一用户同一秒内的重复弹幕去重
-
-4. **等距抽样**（仅 FULL 节点）：
-   - 目标样本量：500 条
-   - 抽样间隔 = 总条数 / 500
-   - 等距抽取，保证覆盖全窗口（不只喂尾部）
-
-5. **输出**：写入 `data/slices/<match_slug>_g{game_no}_{node_type}.jsonl`
-
-**输出文件结构**：
-
-```
-data/slices/
-├── 2026-09-21_lck-cl_t1_vs_drx_g1_bp.jsonl
-├── 2026-09-21_lck-cl_t1_vs_drx_g1_mid.jsonl
-├── 2026-09-21_lck-cl_t1_vs_drx_g1_end.jsonl
-├── 2026-09-21_lck-cl_t1_vs_drx_g2_bp.jsonl
-├── ...
-└── 2026-09-21_lck-cl_t1_vs_drx_full.jsonl
-```
-
-**切片摘要**（`data/slices/<match_slug>_g{game_no}_{node_type}.summary.json`）：
-
-```json
-{
-  "match_slug": "2026-09-21_lck-cl_t1_vs_drx",
-  "game_no": 1,
-  "node_type": "bp",
-  "window": {
-    "start": "2026-09-21T19:00:00+08:00",
-    "end": "2026-09-21T19:05:00+08:00",
-    "start_utc": "2026-09-21T11:00:00Z",
-    "end_utc": "2026-09-21T11:05:00Z"
-  },
-  "count": 1234,
-  "active_users": 567,
-  "sources": {"huya_official": 800, "soop_afchall": 434},
-  "gaps_over_10min": [],
-  "league_isolation": "clean"
-}
-```
-
-#### 5.2.3 验收标准
-
-- [ ] 每个切片文件带窗口起止时间（UTC + 北京时间）
-- [ ] 节点边界与官方 schedule 一致
-- [ ] 跨联赛混源 = 0（回归测试锁定）
-- [ ] 整场复盘切片 = 全窗口等距抽样（不只喂尾部）
-- [ ] 切片前按 league_files 过滤
-- [ ] 混源整场作废（void_match_intel）
-- [ ] 切片摘要包含 count / active_users / sources / gaps
+**本节其余内容以蓝本真实实现为基准抄录**，来源：
+`tools/slice_danmu_by_match.py`（6,583B）、`knowledge/DANMU_CAPTURE_RULES.md`（34,632B）
+§1 / §11 / §12 / §19bis、`knowledge/LIVE_INTEL_SCHEMA.md`（5,125B）。
 
 ---
 
+#### 5.2.0 先回答核心问题：弹幕的「阶段」到底怎么确定？
+
+阶段不是单一维度，而是**三层正交标签**：
+
+| 层 | 取值 | 判定依据 | 用途 |
+|---|---|---|---|
+| **宏观阶段** | `S0` `S1` `S2` `S3` `S4` | 局内计时（游戏内分钟） | 局中情报章节递进 |
+| **节点** | `pre` `bp` `review`（PRD 目标含 `mid` `end` `ot` `full`） | 事件触发（BP 锁定 / 终局确认） | 一局产出多份情报 |
+| **小局** | `g1` `g2` `g3`… | 局间切换 | 逐局切片 |
+
+##### ① 宏观阶段 S0–S4（LoL 通用）
+
+抄自 `knowledge/LIVE_INTEL_SCHEMA.md` §一「比赛阶段划分（LoL 通用）」：
+
+```text
+S0 选人阶段（pick/ban）：阵容选择、BP 评价、counter、版本英雄/负面符号、
+  英雄熟练度质疑、BP 异常度、教练责任（详见 knowledge/BP_INTEL.md）
+S1 0-10 分钟（对线期）：一血、对线压制、打野节奏、镀层
+S2 10-20 分钟（资源期）：先锋、前两条龙、经济差、换线
+S3 20-30 分钟（中期）：团战节奏、第三条龙、单带、大龙决策
+S4 30+（终局）：龙魂、大龙、终结窗口、翻盘窗口
+```
+
+**判据要点**：
+- 边界按**游戏内时间**（不是墙钟时间）：S0 终点 = BP 锁定；S1 起点 = 开局（进游戏 / 对线开始）；
+- CS 与 LoL 分域：CS 无 S0–S4 英雄阶段，改用**图池/选边**（`knowledge/BP_INTEL.md` §4）；
+- 输出必须带「当前阶段 + 阶段进度」（如「S3 中期 / 18 分钟」）——`LIVE_INTEL_SCHEMA` §二 第 0 条。
+
+##### ② 节点 pre / bp / review
+
+**证据**：蓝本 `docs/data/intel/node_data/` 实际存在 **187 份**节点文件，命名形如
+`2026-08-19_dns_bro_g3_pre.json` / `_bp.json` / `_review.json`；且被 `tools/add_paywall.py`
+的 `PRO_RE` 固化为付费层判定规则：
+
+```python
+PRO_RE = re.compile(r"intel_danmu_.*_(pre|live|bp|g[1-9])(?:[_.].*)?\.html$", re.I)
+```
+
+映射关系：
+
+| 蓝本已实现节点 | 含义 | PRD §7.3 对应 |
+|---|---|---|
+| `pre` | 赛前（共识、状态核验） | PRE |
+| `bp` | BP 阶段（选人即情报） | BP |
+| （`live` / `g1`…`g9`） | 局中实时快照 | MID |
+| `review` | 赛后复盘 | FULL / END |
+
+> ⚠️ **设计一致性说明**：PRD 列了 6 个节点（PRE/BP/MID/END/OT/FULL），蓝本实际只
+> 落地 3 个（pre/bp/review）。本设计**以 PRD 6 节点为目标**，并把蓝本 3 节点作为
+> 最小可用子集；`ot`（CS2 加时）为 P1 增量。
+
+##### ③ 小局 game_no
+
+抄自 `knowledge/DANMU_CAPTURE_RULES.md` §11 第 2 条：
+
+> 一场比赛内含多个小局（games[]）：G1/G2/G3 是比赛内部的切片，
+> 局间切换（G1->G2）不重建比赛，只切换局标签；只有对阵/系列变更才开新比赛。
+
+---
+
+#### 5.2.1 采集与切片的起止时机
+
+抄自 `knowledge/DANMU_CAPTURE_RULES.md` §1「抓取规则（什么时候开、什么时候停）」：
+
+```text
+开抓时机：博主开播且正在解说比赛时（直播页面标题含"XX vs XX"、弹幕讨论比赛内容）。
+停抓时机：比赛结束（弹幕出现"GG/结束/下班"或观众讨论下一场时）即停，等下一场再开。
+数据落盘：docs/data/danmu/<博主>/<日期>_<房间>.jsonl（JSONL 一行一条）。
+字段：ts（秒级时间戳）/ nick（昵称）/ uid / text（内容）/ source（稳定来源）/ room_id。
+```
+
+**★ 比赛窗口来源优先级**（抄自 §11 第 4 条）——这是「窗口从哪来」的权威答案：
+
+> 比赛窗口来源优先级：官方开赛/结束时间 > 弹幕 GG/比分信号复核 > 报告数据窗口；
+> 小局窗口须可溯源（官方局间时间或弹幕信号），禁止拍脑袋切局。
+
+| 优先级 | 来源 | 落地物 | 使用条件 |
+|---|---|---|---|
+| 1（最高） | 官方赛程时间 | `docs/data/danmu/schedule.json` | 默认路径；§14.a 要求切片前必须先查 |
+| 2 | 弹幕 GG/比分信号复核 | 终局信号检测（§5.2.2） | 官方时间缺失/漂移时反推 |
+| 3（兜底） | 报告数据窗口 | 上游报告记录 | 前两者都不可用 |
+
+⛔ **禁止事项**：凭感觉切局（「禁止拍脑袋切局」）；用声明窗口冒充实际窗口
+（必须落 `summary.window` 实测值）。
+
+**主播切赛识别**（抄自 §19bis「三信号组合判定」，防止把切台主播的弹幕混进本场）：
+
+```text
+背景：957 / 米勒 / 硕硕等主播会切换直播不同比赛，且切换时标题往往不更新，
+单纯依赖标题不可靠。改为三信号组合判定。
+
+三信号：
+  1. 时间窗预匹配（比赛播出时间表）：
+     以 schedule.json / matches_today.json 的比赛起止时间定义"预期窗口"；
+     该窗口内，若主播联赛覆盖集（第 19 节清单）含本场联赛 -> 期望本场在播；
+  2. 内容实时校验（弹幕内容解读，主信号）：
+     窗口内采样弹幕，用 team_names.json 归一统计队伍提及、比分/BP/局内术语；
+     与本场队伍高度重合 -> 内容匹配；明显指向同时段另一场 -> 疑似切赛；
+     队伍提及稀疏 -> 待核；标题（如可取）仅作辅助，不作主依据；
+  3. 主播行为画像（模型逐步学习）：
+     每主播长期统计：常播联赛/队伍、跟随率（内容与预期窗口一致占比）、
+     切换特征；用于给源加权 + 自适应阈值。
+
+判定与处置：
+  1. 时间窗匹配 + 内容匹配        -> 并入（高置信），来源标注主播名；
+  2. 时间窗匹配 + 内容指向他场    -> 不并入，该时段标"疑似切赛·数据不相关"；
+```
+
+**多直播间同场采集**（抄自 §19，实现「同场比赛多网站采集」）：
+
+> 目标：数据覆盖全面 + 多主播交叉验证；同一比赛有多个直播间数据时尽量全部获取。
+>
+> 执行细则：
+>   1. 比赛确认开播 -> 查本表 + docs/data/intel/leagues.json 该联赛采集集 ->
+>      所有在线直播间一次性加入同一 run_danmu_session（跨平台混用，沿用第 17 条）；
+>   2. 离线直播间在完整性三栏标注"离线未采"，不算静默缺源；
+>   3. 多源交叉验证：两路及以上共振 = 多源确认；单源 = 待验证；方向背离 = 分歧信号；
+>   4. 情报页"实际数据源"按第 17bis 优先级排序标注（虎牙在前）。
+
+**采集进程存活信号**（抄自 §14）：
+
+> 页面开播但 120 秒无首条弹幕标记 live_no_danmaku_alert，禁止解释成"无信号"。
+
+---
+
+#### 5.2.2 终局判定：怎么知道「结束了」
+
+抄自 `knowledge/DANMU_CAPTURE_RULES.md` §12「比赛结束判定校验规则（防误判）」，**原文**：
+
+> 1. 禁止用零散弹幕下"已结束/比分"结论。单条或少数弹幕可能是预测/玩梗/剧透/情绪。
+> 2. 结束判定需 ≥3 类独立信号共振：
+>    a) GG/恭喜/结束类弹幕高密度（连续 ≥2 分钟，达到比赛窗口峰值强度的相当比例，
+>       且不只少数几条）；
+>    b) 比分/图数信号与直播画面/流标题/官方比分源核对（"2:0"须有对应图数确认）；
+>    c) 弹幕流量骤降（窗口密度降到峰值的 <10% 并持续 ≥5 分钟）；
+>    d) 官方/第三方比分源（赛事官网、HLTV、官方房间标题）或主播明确宣布。
+
+**可量化的判定参数**（从上述原文提取，供实现直接使用）：
+
+| 信号 | 阈值参数 | 实现要点 |
+|---|---|---|
+| a 终局词密度 | 连续 ≥2 min；密度达窗口峰值强度的「相当比例」；条数 > 少数几条门槛 | 需定义词表（GG/恭喜/结束/下班/收汁/一波）+ 密度滑窗 |
+| b 比分核对 | `"2:0"` 须有对应图数确认 | 与官方比分源交叉，不单信弹幕 |
+| c 流量骤降 | 密度 < 峰值 10% 且持续 ≥5 min | 滑窗密度曲线 |
+| d 官方源 | 官方比分源 / 主播明确宣布 | 最高权重，可单独成立 |
+
+**终局窗口锚定**（§12 第 10 条，原文标注「最高优先级」）：
+
+> 结果判定必须以"终局窗口"为锚——最后一波/GG/恭喜/结算收盘（如"一波/收汁/减号收了/
+> 小33收"）出现并保持 2 分钟无反转才算结果。局中任何"XX拿下/XX赢了/1-1了/让一追二"
+> 等表述，只要出现在终局窗口之前，一律先视为预测/情绪，禁止当结果；终局窗口内的
+> "随随便便2-0/一波/收"类信号权重最高。教训：FNC-SHFT G2 把局中预测（"shft拿下"00:20、
+> "假翻 右边拿下"00:23、"1:1了"00:15 起）当结果，漏看终局信号（"随随便便2-0"00:31、
+> "减号收了/小33收"00:32-35），误判 SHFT 胜；实际 FNC 2:0。
+
+**四类必须防的误判**（§12 第 11–13 条，每条都带真实事故）：
+
+| # | 误判类型 | 原文要点 | 处置规则 |
+|---|---|---|---|
+| 1 | **边位跨局混用** | 「BO3/BO5 每局红蓝边位可互换——"左边/右边/蓝色方"的指代**不能跨局沿用**」 | 必须逐局用「队伍名 + 边位」显式绑定；无队伍名绑定的左右言论只作情绪 |
+| 2 | **翻盘无主体** | 「"翻了/翻盘/炼金龙翻了/假翻"等只有方向无主体的信号，**禁止直接定胜负**」 | 用赛后归因确认：被集中批「送/带线/演」的一方 = 输方；顺序 = 终局窗口 → 赛后归因 → 队伍名绑定 → 官方确认 |
+| 3 | **局间 hype 当结果** | 「"XX冠军了/XX 2:0 了/带走了/稳了/不用看了"局间 hype 词一律视为情绪」 | 系列结果只等真正终局窗口；小局结束才报小局结果，禁止顺延成系列结果 |
+| 4 | **切台/流量降当结束** | 「二路/解说直播间按自己排期切台 ≠ 本场结束」 | 以官方流 / 官方比分源 / **市场 closed** 为准；Polymarket 结算价未到 1.0 时一律「系列进行中/待官方」 |
+
+**状态粒度铁律**（§12 第 13.e，高频踩坑点）：
+
+> 小局结束后的 BP 阶段 = **未开局**，输出一律写"G2 BP 阶段（尚未开局）"，
+> 禁止写成"G2 进行中/已开始/已开局"；只有开局（进游戏/对线开始）后才写"G2 局中"。
+
+**低样本与置信度**（§12 第 8 条）：
+
+> 低样本门槛：单源且比赛窗口弹幕 <800 条时，结果默认"低置信·待确认"
+
+**用户异议回退**（§12 第 9 条）：
+
+> 用户异议优先回退：用户对结果提出异议时，先把已输出结论降级为"待确认"，
+> 重新交叉验证后再修正落库
+
+---
+
+#### 5.2.3 切片算法（以蓝本真实实现为基准）
+
+蓝本实现在 `tools/slice_danmu_by_match.py`（6,583B / 272 行）。
+
+> ⚠️ **关键事实（必须知道，否则会误设计）**：**脚本本身不做阶段识别**。它读一份
+> `manifest.json`，按其中**已写好的窗口**切。阶段判定的责任在 manifest 的产出方（上游，
+> 即 §5.2.1/§5.2.2 的规则），脚本只做确定性切片。蓝本仓库内**没有自动生成 manifest 的
+> 脚本**（`grep -rln 'slices/manifest'` 只命中文档与脚本自身）——manifest 是人工/分析
+> 会话维护的。
+>
+> **本设计的改动**：把 manifest 生成**自动化**（读 schedule.json + 终局信号 → 产窗口），
+> 消灭人工环节。
+
+**处理单元 = MATCH**（一场 BO 系列），不是直播间、不是小时窗口。
+
+**manifest schema**（抄自脚本 docstring 原文）：
+
+```json
+{
+  "matches": [
+    {
+      "id": "2026-08-19_wbg_lng",
+      "teams": ["WBG", "LNG"],
+      "league": "LPL",
+      "streams": [
+        {"file": "docs/data/danmu/huya/2026-08-19_official_660000.jsonl",
+         "source": "official_660000"}
+      ],
+      "window": {"start": "2026-08-19T15:12:00+08:00", "end": "2026-08-19T16:40:00+08:00"},
+      "games": [
+        {"game_no": 1, "window": {"start": "...", "end": "..."}},
+        {"game_no": 2, "window": {"start": "...", "end": "..."}}
+      ]
+    }
+  ]
+}
+```
+
+**算法步骤**（逐步对应源码函数，可直接照抄实现）：
+
+| # | 函数 | 逻辑 |
+|---|---|---|
+| 1 | `load_rows(file)` | 逐行读 JSONL；单行坏 JSON **跳过不报错**（`except json.JSONDecodeError: continue`）——一行坏不毁全量 |
+| 2 | `row_ts(r)` | 时间戳归一化：优先 `unixtime`（SOOP），否则 `ts`（虎牙：数字秒 或 ISO 串，`+0800`→`+08:00` 修补）；解析失败返 `None` |
+| 3 | `window_ts(w)` | 窗口字符串 → epoch 秒 |
+| 4 | `slice_rows(rows, s, e)` | 取 `s <= ts <= e`，按 ts 升序返回 |
+| 5 | 多 stream 合并 | 每个 `streams[]` 各切一次 → 合并 → 全局按 ts 排序 → 写 `all.jsonl` |
+| 6 | 逐局切分 | 在 `all_rows` 上按每个 `games[].window` 再切 → 写 `game_N.jsonl` |
+| 7 | `summarize(rows)` | 产摘要（字段见下表） |
+| 8 | index upsert | `index.json` 同 id **先删后加**（幂等重跑不重复） |
+
+**输出目录结构**：
+
+```text
+docs/data/danmu/slices/
+├── manifest.json          # 输入：窗口清单（本设计将改为自动生成）
+├── index.json             # 输出：全部比赛索引
+└── <match_id>/
+    ├── all.jsonl          # 整场合并（多 source 交叉验证）
+    ├── game_1.jsonl       # 逐局
+    ├── game_2.jsonl
+    └── summary.json       # 摘要
+```
+
+**`summary.json` 字段**（抄自源码 `summarize()` 实际返回结构）：
+
+| 字段 | 类型 | 计算方式 | 含义 |
+|---|---|---|---|
+| `id` / `teams` / `league` | — | 回填 manifest | 比赛标识 |
+| `streams[]` | list | `{source, count}` | 各源命中条数（**多源交叉验证依据**） |
+| `all.count` | int | `len(rows)` | 切片内弹幕条数 |
+| `all.active_users` | int | `len({uid 或 user_id})` | 去重活跃用户数 |
+| `all.window.start/.end` | str | 首条/末条 ts | **实际**数据窗口（非声明窗口） |
+| `all.sources` | dict | `Counter(source 或 platform)` | 各来源条数分布 |
+| `all.gaps_over_10min` | list | 相邻 ts 差 > 600s | 断档区间 `{from, to, gap_min}` |
+| `games[]` | list | `{game_no, **summarize(game_rows)}` | 逐局摘要 |
+
+**`gaps_over_10min` 为什么重要**（抄 §11 第 6 条）：
+
+> 数据缺口纪律：切片 summary 自动检测 >10 分钟断档并记录；
+> 报告/情报引用切片时必须如实标注缺口（如 TES vs AL 17:32-19:56 断档），
+> 禁止把"切片窗口"当"完整数据"。
+
+---
+
+#### 5.2.4 切片数据的用途是什么
+
+**设计意图的数据流**：
+
+```text
+原始层 JSONL（永不改写，按流/日落盘）
+   └─▶ 切片层 slices/<match>/{all,game_N}.jsonl + summary.json
+          ├─▶ 规则统计层：计数 / 密度曲线 / 词频 / 灰信号候选 / BP 统计
+          ├─▶ 提炼层：按节点喂「统计摘要 + ≤60 条样本」→ LLM 打字
+          └─▶ 缺口审计：gaps_over_10min → 报告「数据与溯源」段
+                 └─▶ 校验门禁 → 输出层 HTML/MD → 发布
+```
+
+**⚠️ 蓝本现状（必须如实说明）**：`grep -rln 'slices/' tools/` 在蓝本仓库内
+**只命中 `slice_danmu_by_match.py` 自身与 `tools/INDEX.md`** —— 即切片产物
+**目前没有程序化下游消费**，它是「给人和给分析会话看的中间视图」。
+
+**这就是你觉得 §3.3 讲不清用途的根本原因：在蓝本里它确实还没接上下游。**
+
+**本设计的改动**：明确 3 个消费方，把切片层接进流水线：
+1. **规则统计层**（程序）—— 逐局计数、密度曲线、词频、灰信号候选；
+2. **提炼层**（LLM）—— 按节点（pre/bp/review）喂对应切片 + 统计摘要；
+3. **缺口审计**（监控/报告）—— `gaps_over_10min` 进报告「0-10 数据与溯源」段。
+
+**切片与报告十段结构的对应**：
+
+| 报告段 | 用哪个切片 |
+|---|---|
+| 0 比赛信息 / 1 结果总览 | `all` + `index.json` |
+| 2 逐局复盘 | `game_1/2/3.jsonl` |
+| 3 队伍画像 / 4 人员画像 | 逐局切片 + `players.json`/`teams.json` 画像 |
+| 5 灰信号汇总 | 全窗口切片（灰信号跨局共振） |
+| 6 联赛规律与版本 | 跨场切片聚合（需 DB/索引） |
+| 7 预测验证 | 对应节点切片（预测发生的那个节点） |
+| 8 盘口讨论 | 含数字/盘口词的切片 + `price_paths.json` |
+| 9 情报含义与后续观察点 | 全节点切片 |
+| 10 数据与溯源 | `summary.json`（含 gaps） |
+
+---
+
+#### 5.2.5 存储选型：为什么用 JSONL？存数据库有什么优劣？
+
+**为什么 JSONL（4 条理由，按对本项目的权重排序）**：
+
+| # | 理由 | 具体收益 |
+|---|---|---|
+| 1 | **只增不改（append-only）** | 采集是持续写入的流。JSONL 追加零锁零事务，进程崩溃最多丢最后一行；DB 写入热点需处理并发/锁 |
+| 2 | **一行坏不毁全量** | 蓝本 `load_rows()` 对坏行 `continue`。JSONL 天然行级隔离；单文件 JSON 数组一旦截断则整文件作废 |
+| 3 | **免 schema 迁移** | 平台字段不统一（虎牙 `ts` / SOOP `unixtime` / KICK、Twitch 又各一套）。JSONL 允许逐行异构，新增平台不动历史数据；DB 需 migration |
+| 4 | **可 diff / 可回溯 / 可 grep** | 文本行 = 天然 diff 单位；`git log`、`wc -l`、grep 直接可用，审计友好 |
+
+**存数据库的优劣对比**：
+
+| 维度 | JSONL（蓝本选择） | 数据库（SQLite / Postgres） |
+|---|---|---|
+| 写入 | ✅ append-only，无锁，流式 | ⚠️ 需事务/批量提交，高并发热点 |
+| 查询聚合 | ❌ 每次全量扫文件（O(n)） | ✅ 索引 + 聚合下推，快几个量级 |
+| 并发写 | ❌ 蓝本实测「**禁止同时跑两个抓取进程写同一文件（实测会混行）**」 | ✅ 原生并发控制 |
+| Schema 演进 | ✅ 免迁移，逐行异构 | ⚠️ 需 migration + 历史回填 |
+| 运维 | ✅ 零依赖，一个目录即全部状态 | ⚠️ 需备份/迁移/版本管理 |
+| 体积 | ⚠️ 文本冗余大 | ✅ 压缩/列存更省 |
+| 可审计 | ✅ 人类可读 + git 友好 | ⚠️ 需导出才可读 |
+
+> **蓝本现状证据**：全仓库 `grep -rln 'sqlite3\|psycopg\|SQLAlchemy\|CREATE TABLE\|duckdb'`
+> **零命中**（唯一命中 `tools/label_esports_users.py` 为无关用法）——**蓝本全程零数据库**。
+
+**本设计的取舍（诚实结论，不照抄蓝本）**：
+
+- **原始层 + 切片层继续用 JSONL** —— 理由 1/2/4 对「永不改写的原始证据」是刚需。
+- **规则统计层引入 SQLite 做索引与聚合** —— 跨场统计（联赛规律、页面排行、灰信号共振）
+  在全量扫文件下随数据量线性劣化，会冲垮 §10.1 的 SLA；SQLite 零运维、单文件，
+  符合 AGENTS.md「最简实现 + 优先成熟依赖」。
+- **★ 一条分界原则**：
+  > **原始证据 = JSONL（append-only，永不改写）；可重算的统计 = DB（随时可从 JSONL 重建）。**
+  >
+  > DB 不是新的 ground truth，只是**派生缓存**——丢了可以从 JSONL 全量重跑。
+  > 这条原则同时保证了：审计可回溯（JSONL 在）+ 查询够快（DB 在）。
+
+---
+
+#### 5.2.6 验收标准
+
+**阶段判定**：
+- [ ] 三层标签（S0-S4 / pre-bp-review / game_no）在切片产物中均可定位
+- [ ] 每个窗口可回答「来源 = 官方 schedule / 弹幕信号 / 报告兜底」（可追溯，非拍脑袋）
+- [ ] 起抓/停抓实现与 §5.2.1 原文一致（开播且解说中开；GG/结束/讨论下一场停）
+- [ ] 终局判定实现 ≥3 类信号共振，4 类信号各自阈值有单元测试边界覆盖
+- [ ] 回归锁定 §12 第 10 条 FNC-SHFT 案例：局中预测词不得判结果，终局窗口词优先
+- [ ] 回归锁定 §12 第 11 条 SK 案例：边位不跨局沿用；无主体翻盘词不得定胜负
+- [ ] 回归锁定 §12 第 12 条：局间 hype 词不得判系列结束
+- [ ] 回归锁定 §12 第 13 条 TT-LGD 案例：切台/流量骤降不得判系列结束
+- [ ] 回归锁定 §12 第 13.e：BP 静默期输出必须为「未开局」
+- [ ] 低样本（单源 <800 条）自动降级「低置信·待确认」
+- [ ] 用户异议可将已输出结论降级「待确认」并重新交叉验证
+
+**切片实现**：
+- [ ] 每个切片文件带窗口起止时间（UTC + 北京时间）
+- [ ] 单行坏 JSON 不中断整批（坏行跳过并可计数）
+- [ ] `unixtime` 与 `ts` 两种时间戳均能归一化（含 `+0800` 修补）
+- [ ] 多 stream 合并后按 ts 全局有序
+- [ ] manifest 幂等重跑不产生重复切片（index upsert）
+- [ ] 跨联赛混源 = 0（回归测试锁定）
+- [ ] 混源整场作废（`void_match_intel`）
+- [ ] 整场复盘切片 = 全窗口等距抽样（不只喂尾部）
+- [ ] `summary.json` 含 count / active_users / window / sources / gaps_over_10min
+- [ ] 切片产物有明确下游消费方（规则层 + 提炼层），不得「只生成不消费」
+
+**存储分工**：
+- [ ] 原始层与切片层为 append-only JSONL，无原地改写路径
+- [ ] 规则统计层的 SQLite 可由 JSONL 全量重建（重建脚本 + 测试）
+- [ ] DB 丢失不导致证据丢失（JSONL 完备性测试）
+
 ### 5.3 规则统计层（rules）
+
+
+#### 5.3.0 规则统计层产物清单（★ 用户问「规则统计层的诸多 json 数据」）
+
+**蓝本实际产物**（来源：`find docs/data/intel -name '*.json'`、`ls docs/data/intel/node_data | wc -l`，
+以及 `knowledge/DANMU_CAPTURE_RULES.md` §14 的三件套定义 —— 非虚构清单）：
+
+| JSON | 位置 | 用途 | 消费方 |
+|---|---|---|---|
+| `matches.json` | `docs/data/intel/` | 比赛主档，含 `games[].bp_intel` | 页面生成、情报引用 |
+| `players.json` | 同上 | 选手画像（近期状态 / 焦点英雄） | `LIVE_INTEL_SCHEMA` §三 引用 |
+| `leagues.json` | 同上 | 联赛规律 + **每联赛默认采集集**（§19 直播源匹配用） | 采集层选源、统计层联赛口径 |
+| `bp_signals.json` | 同上 | 单场 BP 信号（含赛后 `verdict` 回填） | BP 情报、赛后验证 |
+| `bp_entities.json` | 同上 | 教练 / 选手 BP 留痕（再犯升级） | 灰信号升级链 |
+| `rosters.json` | 同上 | 阵容名册 | 归属判定 |
+| `aliases.json` | 同上 | 队名 / 选手别名归一 | 弹幕文本归一（`normalize`） |
+| `compositions.json` | 同上 | 阵容 / 体系库 | BP 评价 |
+| `maps.json` | 同上 | CS 地图池 | CS 分域统计 |
+| `price_paths.json` | 同上 | 盘口价格轨迹 | 「盘口讨论」段、灰信号共振判定 |
+| `streamer_profiles.json` | 同上 | 主播画像（常播联赛 / 跟随率） | §19bis 切赛识别 |
+| `validation_samples.json` | 同上 | 预测验证样本 | 「预测验证」段 |
+| `node_data/*.json` | `docs/data/intel/node_data/` | **187 份**节点情报，命名 `<date>_<a>_<b>_g<N>_{pre,bp,review}.json` | `tools/build_node_page.py` |
+| `intel_signals.json` | `knowledge/` | 主观情报信号库（25,465 B） | 情报库检索 |
+| `intel_signal.schema.json` | `schemas/` | 上述的 JSON Schema 契约（7,915 B） | 写库前校验 |
+
+**BP 情报三件套**（抄自 `knowledge/DANMU_CAPTURE_RULES.md` §14）：
+
+```text
+(a) docs/data/intel/bp_signals.json  —— 单场 BP 信号
+(b) docs/data/intel/bp_entities.json —— 教练/选手留痕（再犯升级）
+(c) docs/data/intel/matches.json 的 games[].bp_intel —— 归入比赛档案
+```
+
+**`intel_signal.schema.json` 的 `required` 字段**（逐字抄自 schema 文件）：
+
+```text
+id                  信号编号，pattern ^IS-\d{4}-\d{2}-\d{2}-\d{3}$   （例 IS-2026-08-31-001）
+date                采集日期 YYYY-MM-DD
+event_slug          比赛 slug                      （例 lol-t1-hle1-2026-08-08）
+source_person       来源人 / 来源房间              （例 957 / 二路解说多人 / 弹幕聚合）
+source_type         枚举：caster_co | caster_official | streamer | official | community
+credibility         可信度
+quote               原话引用
+tags                标签数组
+object / object_type  指向对象（队伍 / 选手 / 教练）
+direction           方向
+timing              时机
+verification        验证状态
+```
+
+**为什么规则层用 JSON（而不是也塞进 JSONL）**：
+
+规则层是**结构化小对象集合**（固定字段、有 JSON Schema 契约、需按 `id` 去重与 upsert），
+不是逐行追加的流。JSON + Schema 能直接约束「整份合法」；用 JSONL 反而丢掉整体校验能力，
+且 upsert（如 `bp_signals.json` 回填 `verdict`）在 JSONL 上很难做。
+
+**三层存储分界原则**（与 §5.2.5 一致，全项目统一）：
+
+| 数据性质 | 载体 | 理由 |
+|---|---|---|
+| 流式原始证据（弹幕） | **JSONL**（append-only，永不改写） | 一行坏不毁全量、免 schema 迁移、可 diff |
+| 结构化小档（规则层产物） | **JSON** + JSON Schema | 需整体校验、需 upsert、体量小 |
+| 需要跨场聚合查询 | **SQLite**（本设计新增，可从 JSONL/JSON 重建） | 索引与聚合性能 |
+
+> ⚠️ 蓝本现状：全仓库 `grep -rln 'sqlite3\|psycopg\|SQLAlchemy\|CREATE TABLE\|duckdb'` **零命中**
+> （唯一命中 `tools/label_esports_userl.py` 为无关用法）—— 蓝本**全程零数据库**，聚合全靠扫文件。
+
+**验收标准**：
+- [ ] 上表每份 JSON 都有对应 JSON Schema（或字段说明），写库前校验
+- [ ] `node_data/` 命名规范固化，`_pre` / `_bp` / `_review` 三节点齐全（缺一即告警）
+- [ ] 规则层 JSON 的 upsert 幂等（同 id 重复写结果一致）
+- [ ] `intel_signals.json` 的每条记录通过 `intel_signal.schema.json` 校验
+- [ ] SQLite 派生视图可仅由 JSONL + JSON 完整重建（重建脚本 + 测试）
+- [ ] 删除 SQLite 文件后系统仍能工作（仅降速，不丢数据）
 
 **职责**：词表统计 + 密度时间线 + 灰信号计数。**纯确定性输出**。
 
@@ -934,22 +1308,202 @@ def can_publish_endgame(signals: dict) -> bool:
 
 ---
 
+
 ### 5.11 对外 API
 
-> **PRD 原文（§7.12）**：
+> **PRD 原文（§7.12「对外 API」）**：
 > | API | 用途 | 说明 |
 > |---|---|---|
-> | POST /api/lead | 订阅登记 | 表单 → 推站长 TG |
-> | POST /api/verify-member | 会员验证 | TG/QQ × 名单 × expires → 解锁 |
-> | GET /api/stats | 站点统计 | 累计/今日 PV、页面排行 |
+> | `POST /api/lead` | 订阅登记 | 表单 → 推站长 TG |
+> | `POST /api/verify-member` | 会员验证 | TG/QQ × 名单 × expires → 解锁 |
+> | `GET /api/stats` | 站点统计 | 累计 / 今日 PV、页面排行 |
 
-#### 5.11.1 验收标准
+**本节以蓝本 `tools/stats_server.py`（8,067 B）与 `tools/add_paywall.py`（8,278 B）
+的真实实现为基准抄录**，不是设计构想。
 
-- [ ] POST /api/lead → 推站长 TG
-- [ ] POST /api/verify-member → 解锁
-- [ ] GET /api/stats → 站点统计
+#### 5.11.0 接口总表（真实路由）
 
----
+| 层 | 路由 | 方法 | 鉴权 | 数据落点 / 来源 | 调用方 |
+|---|---|---|---|---|---|
+| VPS `stats_server.py`（:8080，systemd `stats-server.service`） | `/track` | POST | header `X-Stats-Secret` | 追加 `runtime/stats/events.jsonl` | Vercel 转发 |
+| 同上 | `/lead` | POST | header `X-Stats-Secret` | 追加 `runtime/leads.jsonl` | Vercel 转发 |
+| 同上 | `/stats` | GET | `?secret=` | 只读聚合 | 站长 / 后台 |
+| 同上 | `/leads` | GET | `?secret=` | 只读明细 | 站长 / 后台 |
+| 同上 | `/members` | GET | `?secret=` | 只读 `members.json` | 付费墙 |
+| Vercel `danmu-intel-api.vercel.app` | `/api/track` | POST | **公开** | → VPS `/track` | 页面打点脚本 |
+| Vercel | `/api/lead` | POST | **公开** | → VPS `/lead` + 推 TG | 订阅表单 |
+| Vercel | `/api/verify-member` | POST | **公开** | 读 `members.json` | 付费墙弹窗 |
+
+`stats_server.py` 是零依赖 `ThreadingHTTPServer`（标准库），默认端口 8080，无框架。
+
+#### 5.11.1 三个必须先说清的事实（否则实现必踩坑）
+
+**① `POST /api/verify-member` 的实现不在蓝本仓库里。**
+
+```text
+$ grep -rln "verify-member\|verify_member" .
+docs/task/DANMU_INTEL_CLOUD_PYTHON_PROJECT_PRD.md
+tools/add_paywall.py        ← 只是调用方
+```
+
+蓝本**没有 `api/` 目录、没有 `vercel.json`** —— 它在 Vercel 项目 `danmu-intel-api.vercel.app`
+里。也就是说：**付费链路有一半代码游离在版本控制之外**。
+
+→ 这直接回答「verify-member 是给谁用的」：**给付费墙弹窗用的**（客户端 `fetch`），
+调用方是**浏览器里的访客**，鉴权 = **无**（凭 `identifier` 查名单）。
+→ 本设计必须把它**收回本仓库**（见 §15.6）。
+
+**② `GET` 类接口的 secret 走 URL query**（`/stats?secret=...`），会进 access log。
+→ 设计改为**统一走 header**。
+
+**③ `/track` 与 `/lead` 是公开接口**（无鉴权，任何页面都能打点）。
+→ 需要反滥用：**限流 + 来源校验**（v1 先做限流）。
+
+#### 5.11.2 逐个接口的完整契约
+
+**`POST /track`** —— 页面浏览打点
+
+```text
+headers: X-Stats-Secret: <STATS_SECRET>
+body:    {"page": "/intel/intel_danmu_lck_...", "ref": "", "visitor": "<uuid>", "site": "danmu"}
+```
+
+VPS 落盘一行（所有字符串字段**截断防注入**）：
+
+```json
+{"ts":"2026-08-26T21:03:11+08:00","page":"/intel/...","ref":"","visitor":"<uuid>","site":"danmu"}
+```
+
+| 字段 | 截断上限 | 说明 |
+|---|---|---|
+| `ts` | — | 服务端生成，北京时间 ISO8601 |
+| `page` | ≤200 | 页面路径 |
+| `ref` | ≤200 | 来源页 / referrer |
+| `visitor` | ≤64 | **匿名访客 ID**（见 §5.11.3） |
+| `site` | ≤32 | 站点标识（`danmu` / `musk` / …），支持多站点合并统计 |
+
+**`POST /lead`** —— 订阅登记留痕
+
+```text
+body: {"name":"...","contact":"...","plan":"...","note":"..."}
+```
+
+落盘 `runtime/leads.jsonl`，截断 name ≤100 / contact ≤100 / plan ≤60 / note ≤200。
+
+源码注释原文（说明它为什么存在）：
+
+> 订阅登记留痕（2026-08-26：表单只推 TG 无记录，漏通知即丢；现在落盘可审计）
+
+**`GET /stats?secret=&site=`** —— 站点统计聚合
+
+返回结构（抄自 `stats()` 返回值）：
+
+```json
+{
+  "date": "2026-08-26",
+  "site": "danmu",
+  "total_views": 12345, "today_views": 456, "week_views": 3210,
+  "total_visitors": 890, "today_visitors": 37, "week_visitors": 210,
+  "days": [{"date": "2026-08-13", "views": 100, "visitors": 20}],
+  "top_pages": [["/intel/intel_danmu_...", 120]]
+}
+```
+
+- `days` = **近 14 天逐日**；`top_pages` = 前 15 页面排行
+- `site` 不传 = 全部站点合并（兼容旧调用）
+
+**`GET /leads?secret=`** —— 订阅登记明细（按 `ts` 倒序）
+
+**`GET /members?secret=`** —— 会员名单（读 `members.json`；缺失返回 `{"members": []}`）
+
+**`POST /api/verify-member`**（Vercel 端，本设计收回本仓库）
+
+```json
+请求  {"identifier": "<TG用户名或QQ号>"}
+响应  {"member": true, "expires": "2026-10-01T00:00:00+08:00"}
+```
+
+客户端缓存：`localStorage["danmu_member_v1"] = {member, expires, checkedAt}`，
+**24 小时内不重复校验**（判据 `Date.now() - checkedAt < 86400000`）。
+
+#### 5.11.3 站点统计（★ 用户问「如何统计站点数据」）
+
+**打点链路（三段）**：
+
+```text
+① 页面注入脚本（tools/add_stats_track.py 注入到所有 HTML 的 </body> 前）
+   ├─ 访客 ID：localStorage["di_v"]，首次访问生成 crypto.randomUUID()，之后复用
+   └─ fetch POST https://danmu-intel-api.vercel.app/api/track
+        {page: location.pathname, visitor: v}      ← catch 静默失败，不阻塞页面
+② Vercel /api/track 中转（附 X-Stats-Secret）
+③ VPS stats_server.py /track → 追加 runtime/stats/events.jsonl
+```
+
+**PV / UV 定义**：
+
+| 指标 | 定义 |
+|---|---|
+| **PV** | `events.jsonl` 行数（按 `site` + 时间窗过滤） |
+| **UV** | `visitor` 字段的 `distinct` 计数 |
+| 今日 | `ts[:10] == today` |
+| 本周 | `day >= today - 6` |
+| 累计 | 全部 |
+| 逐日 | 近 14 天 |
+
+**★「能知道每天有多少人来过付费页面？都是谁？」—— 分两问答：**
+
+**① 有多少人来过付费页？能，而且现成。**
+
+`events.jsonl` 每行都带 `page`，直接按 `page` 过滤聚合即可。现有 `/stats` 已返回
+`top_pages`（页面排行）与 `days`（近 14 天逐日 PV/UV）。
+
+- 方案 a（零改动）：`grep '"page":"/subscribe' runtime/stats/events.jsonl | wc -l`
+- 方案 b（推荐，本设计采用）：给 `/stats` 加 `page` 过滤参数，返回该页的
+  `today` / `week` / `total` + `days[]` 曲线
+
+**②「都是谁」？—— 现有实现做不到，这是必须诚实说明的边界。**
+
+`visitor` 是 **localStorage 里的随机 UUID**，它只能回答「**同一个浏览器来过几次**」，
+**不能回答「这个人是谁」**：
+
+| 偏差 | 情形 | 后果 |
+|---|---|---|
+| 换浏览器 / 清缓存 / 隐私模式 | 同一人不同 UUID | **UV 虚高** |
+| 同一设备多人共用 | 多人同一 UUID | **UV 虚低** |
+| 任何情况 | UUID 与真实身份（TG / QQ / 邮箱 / 链上地址）**无任何关联** | 无法归人 |
+
+**要回答「都是谁」，必须建立身份关联。三条路径（按侵入性排序）**：
+
+| 方案 | 做法 | 能知道什么 | 代价 |
+|---|---|---|---|
+| **A. 留资关联**（推荐，v1 采用） | 订阅表单提交时把 `visitor` UUID 一起带上 → 与 `contact` 绑定写入 `leads.jsonl` | 已留资者的完整访问轨迹 | 只能覆盖留资用户 |
+| **B. 登录态关联** | 用户登录后 `visitor` ← 用户 ID | 登录用户的完整轨迹 | 需账户体系（可复用 `user` 角色） |
+| **C. 会员解锁关联**（v1 采用） | `verify-member` 成功时回写 `visitor` ↔ `identifier` | 付费会员的访问轨迹 | 只能覆盖付费会员 |
+
+**本设计采用 A + C**（v1 不强制登录）：在「表单提交」与「解锁成功」这两个**用户主动表明身份**
+的时刻回写 `visitor ↔ 身份` 映射，此后该 UUID 的访问即可归属到人。
+
+→ **明确边界**：未留资 / 未付费的匿名访客，**永远只能知道「来过几次」，不知道「是谁」**。
+这是隐私上的正确设计（不是缺陷），必须在文档与页面上如实标注。
+
+**付费页专项看板（本设计新增）**：
+
+1. `/stats?page=<路径>` —— 单页 PV/UV + 逐日曲线
+2. `/stats?funnel=1` —— 转化漏斗：**付费页 PV → 表单提交数 → 解锁成功数**
+   （回答「漏斗哪一段在漏人」）
+
+#### 5.11.4 验收标准
+
+- [ ] `verify-member` 实现收回本仓库（消灭游离代码），有单元测试
+- [ ] 所有 `GET` 类接口鉴权走 header，不再用 URL query
+- [ ] `/track`、`/lead` 有速率限制；超限返回 429 且有测试
+- [ ] `/stats?page=` 可单独统计任意页面（含付费页）的 PV/UV 与逐日曲线
+- [ ] `/stats?funnel=1` 返回转化漏斗（PV → lead → 解锁）
+- [ ] 留资 / 解锁时回写 `visitor ↔ 身份` 映射；映射表可审计、可删除
+- [ ] 匿名访客统计口径在文档与页面上均标注「匿名 UUID，非实名」
+- [ ] `events.jsonl` / `leads.jsonl` 追加写入幂等，单行坏不影响后续
+- [ ] 各接口 401（secret 错）/ 400（字段缺）/ 429（限流）分支均有测试
+- [ ] `top_pages` 与 `days` 口径有单元测试（跨日边界、site 过滤）
 
 ## 6. 数据设计
 
@@ -1139,6 +1693,58 @@ python -m danmu_intel.publish deploy --check
 
 ---
 
+---
+
+### 9.5 站点推送与 Deploy Key（★ 用户问「GitHub Deploy Key 是干什么的」）
+
+**蓝本真实实现**——`tools/commit_site_pages.sh`（399 B，全文抄录）：
+
+```bash
+#!/bin/bash
+# 服务器端：把 site_repo 中指定页面提交并推送（deploy key）。
+# 用法：bash tools/commit_site_pages.sh "提交说明" file1 file2 ...
+set -euo pipefail
+cd /opt/danmu-intel/site_repo
+export GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=accept-new"
+git add "${@:2}"
+git commit -m "$1" -q
+git push -q origin main
+echo "committed and pushed"
+```
+
+#### 9.5.1 它是什么、干什么
+
+| 项 | 说明 |
+|---|---|
+| **是什么** | 一对 **SSH 密钥**。公钥以 **Deploy Key** 形式挂在 GitHub 仓库设置里；私钥放在服务器 `/root/.ssh/github_deploy` |
+| **干什么** | 服务器生成 HTML 页面 → 提交到 `site_repo`（**独立于代码仓库的站点仓库**）→ `git push origin main` |
+| **为什么用 Deploy Key 而非账号** | Deploy Key 是**仓库级**凭据，不携带个人账号权限；泄露影响面最小，且可单仓库吊销 |
+| **与部署的关系** | `site_repo` 收到 push → 触发 Vercel 自动构建部署（这就是「站点推送」链路） |
+| **为什么两个仓库** | **代码仓库**（`danmu-intel`）+ **生成物仓库**（`site_repo`）分离。生成物不进代码仓库，避免每日报告 diff 污染代码历史 |
+
+**一句话**：Deploy Key = 「让服务器有权把生成好的站点页面推到站点仓库」的**仓库写入凭据**，
+它是**自动发布链路**的钥匙，不是访问密钥、也不是 API 密钥。
+
+#### 9.5.2 本设计的安全要求
+
+| 要求 | 具体做法 |
+|---|---|
+| **绝不入库** | 私钥文件内容、其 base64、任何片段都不得出现在仓库、issue、日志、文档中，值一律写 `[REDACTED]`；`config/` 只存**路径**不存内容 |
+| **权限收紧** | `chmod 600 /root/.ssh/github_deploy`，属主 `root` |
+| **最小权限** | Deploy Key **只挂站点仓库**，权限只给 write（**不给 admin**），勾选「Allow write access」即可 |
+| **可轮换** | 泄露时在 GitHub 仓库 Settings → Deploy keys 单方面删除并重发，无需改服务器代码 |
+| **CI 门禁** | 仓库扫描 `grep -rn "BEGIN OPENSSH PRIVATE KEY" .` 必须 0 命中 |
+| **忽略规则** | `.gitignore` 覆盖 `site_repo/`、`*.pem`、`id_*`、`.env` |
+
+#### 9.5.3 验收标准
+
+- [ ] 部署文档含 Deploy Key 的**生成 → 挂载 → 校验**三步（含 `ssh-keyscan` 步骤）
+- [ ] `ssh -i /root/.ssh/github_deploy -T git@github.com` 在部署自检中执行且期望输出含 `successfully authenticated`
+- [ ] 仓库内 `grep -rn "BEGIN OPENSSH PRIVATE KEY"` = 0 命中（CI 门禁）
+- [ ] `.gitignore` 覆盖 `site_repo/`、`*.pem`、`id_*`、`.env`
+- [ ] 站点推送失败**有告警**（不静默），且不影响情报主流程
+- [ ] `config/` 中只出现私钥**路径**，不出现内容
+
 ## 10. 非功能需求
 
 ### 10.1 性能与 SLA
@@ -1261,6 +1867,9 @@ pytest 全绿 → 覆盖率 ≥90% → 生成页结构门禁 → 事实层官方
 12. **终局防误**：任何"比赛结束"发布必经四信号 + 四道闸（含 CS2 加时制参数化）
 13. **测试覆盖 ≥ 90%**：单元测试 + E2E 浏览器测试双层覆盖；CI 门禁低于 90% 禁止合并
 14. 支付模块：支持 Polygon + Solana 两条链
+15. **站点统计**：PV/UV 可按 `site` 与 `page` 维度查询；付费页漏斗（PV → lead → 解锁）可查；
+    匿名访客口径如实标注「匿名 UUID，非实名」（见 §5.11.3）
+16. **密钥卫生**：仓库内零私钥（Deploy Key / 钱包密钥 / API Key），CI 扫描门禁；所有敏感值走环境变量（见 §9.5.2）
 
 ---
 
@@ -1332,6 +1941,34 @@ payment:
 - [ ] 每笔入账落库可回溯
 
 ---
+
+#### 15.6 付费链路代码收回（消灭游离实现）
+
+**问题**：`POST /api/verify-member` 的实现不在蓝本仓库内（`grep -rln "verify-member"` 全仓库
+只命中文档与调用方 `tools/add_paywall.py`），实际代码在 Vercel 项目
+`danmu-intel-api.vercel.app` 里，而蓝本**没有 `api/` 目录、没有 `vercel.json`**。
+后果：付费链路**一半代码不在版本控制内**，无法 code review、无法回归测试、
+无法与 `members.json` 的写入逻辑（VPS 侧）做跨端一致性校验。
+
+**处置**：把 Vercel 端的 3 个 serverless function 一并纳入本仓库：
+
+```
+danmu-intel/
+├── api/                    ← 新增：Vercel Serverless Functions
+│   ├── track.js            # POST → 转发 VPS /track
+│   ├── lead.js             # POST → 转发 VPS /lead + 推 TG
+│   └── verify-member.js    # POST → 读 members.json 判定
+├── vercel.json             ← 新增：路由与构建配置
+```
+
+**接口契约不变**（对外行为与蓝本一致，见 §5.11.2），只是把实现搬进仓库。
+`members.json` 的**唯一写入方**必须是 VPS 的支付模块（§15.3），Vercel 端**只读**。
+
+**验收**：
+- [ ] `api/` 三个 function 在仓库内可见，有单元测试（mock `members.json`）
+- [ ] `vercel.json` 在仓库内，部署配置可复现
+- [ ] `members.json` 只有一处写入方（VPS 支付模块），有静态检查或测试锁定
+- [ ] `verify-member` 的 `expires` 过期判定有边界测试（当天到期 / 已过期 / 无 `expires`）
 
 ## 16. 已拍板决策
 
