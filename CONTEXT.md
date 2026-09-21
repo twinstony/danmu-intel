@@ -66,6 +66,9 @@
 | 马斯克打包 | v1 不做，专注单卖 | ADR-0005 |
 | 标签契约 | 5 个规范标签原样使用：`needs-triage` `needs-info` `ready-for-agent` `ready-for-human` `wontfix` | `docs/agents/triage-labels.md` |
 | issue 粒度 | 同一需求尽量写在同一个 issue 里 | — |
+| **站点部署** | **页面本机 Caddy 直出**：废弃站点仓库 / GitHub Pages / Vercel / Deploy Key；发布用原子 rename，失败回滚 | **ADR-0006** |
+| **数据存储** | **分层统一入库**：档案/状态/统计/商业全入 SQLite；JSONL 只留原始弹幕与切片；配置与 Schema 留文件；散 JSON 进 `intel_asset` | **ADR-0007** |
+| 统一入口 | API 服务只监听 `127.0.0.1:8080`，外部统一经 Caddy 443（TLS + 静态 + `/api/*` 反代） | ADR-0006 |
 
 ---
 

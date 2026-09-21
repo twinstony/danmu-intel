@@ -1170,37 +1170,144 @@ def can_publish_endgame(signals: dict) -> bool:
 
 ### 5.7 发布层（publish）
 
-**职责**：站点生成 + 付费墙 + 发布审计。
+**职责**：站点生成 + 付费墙 + **本机直出发布** + 发布前审计 + 秒级回滚。
 
-> **PRD 原文（§7.8）**：
-> 
+> **PRD 原文（§7.8「发布层」）**：
+>
 > **FR-PUB-1 站点生成**：
 > 页面类型：今日情报（赛程+节点进度+节点入口）、历史情报库、画像库、灰信号统计、
->   验证闭环、订阅页；
+> 验证闭环、订阅页；
 > 今日页每场必须展示节点进度（未开始/进行中/已结束 + 已出节点）；
-> 时间轴壳（match_<slug>.html）必须与节点页同步（禁止「页面上线但入口显示暂无」）；
+> 时间轴壳（`match_<slug>.html`）必须与节点页同步（禁止「页面上线但入口显示暂无」）；
 > 比赛一结束，该场所有节点页自动转免费公开。
-> 
+>
 > **FR-PUB-2 付费墙**：
 > Pro = 进行中的节点页 + 完整画像；其余全公开；
-> 付费墙注入按「比赛是否已结束」判定（settlements / 全小局 closed / 结果回填），
->   禁止按文件名一刀切；
-> 会员验证：TG 用户名/QQ 号 × 名单 × expires，本地 24h 缓存。
-> 
+> 付费墙注入按「比赛是否已结束」判定（`settlements` / 全小局 `closed` / 结果回填），
+> 禁止按文件名一刀切；
+> 会员验证：TG 用户名 / QQ 号 × 名单 × `expires`，本地 24h 缓存。
+>
 > **FR-PUB-3 发布前审计与回滚**：
 > 全站审计：导航唯一、无旧模板残留、Pro 页付费墙齐全、节点完整性、
->   页面 × 联赛 × slug 关联一致、速览卡残留为 0；
+> 页面 × 联赛 × slug 关联一致、速览卡残留为 0；
 > 审计不通过 = 不发布；
 > 发布链路：VPS → 站点仓库 → GitHub Pages（或 nginx 直出），目标 ≤1 分钟；
 > 异常时保留上一版站点，修复后重新发布。
 
-#### 5.7.1 验收标准
+**★ 本设计的关键选择（依据用户 2026-09-22 指令）**：
 
+> 「不要将生成好的页面再推到其它站点，而是当前服务器内部解决页面部署问题，不再依赖其它站点」
+
+注意 PRD 原文写的是「**站点仓库 → GitHub Pages（或 nginx 直出）**」——它**本身就给了两个选项**。
+本设计**选定「本机直出」这一支**，并彻底废弃「站点仓库」「GitHub Pages」「Vercel」三样外部依赖。
+决策依据见 **ADR-0006**。
+
+#### 5.7.0 为什么废弃「推送到外部站点」
+
+| 维度 | 旧链路（站点仓库 → GitHub Pages/Vercel） | 新链路（本机 Caddy 直出） |
+|---|---|---|
+| 依赖的外部系统 | GitHub（仓库+Pages）、Vercel、Deploy Key | **零**（只有本机 Caddy） |
+| 密钥面 | 需长期持有 `github_deploy` 私钥 | **无 SSH 密钥**，消灭一类泄露面 |
+| 发布延迟 | `git commit` + `push` + 远端构建（数十秒~数分钟） | **原子 rename，毫秒级** |
+| 失败模式 | push 被 GFW 干扰（本项目已多次实测 TLS 握手失败） | 本机文件操作，无网络依赖 |
+| 页面即时性 | 受远端构建队列影响 | 落地即可见 |
+| 数据出境 | 页面内容推到第三方平台 | **不出本机** |
+| 需要的能力 | Deploy Key 管理、仓库权限、CI 权限 | TLS 证书（Caddy 自动）、一个静态根目录 |
+| 代价 | — | 自带 TLS 续期；无 CDN 边缘缓存（本项目访问量下无影响） |
+
+> **结论**：旧链路的**唯一优势**是「有人替你管 TLS 和 CDN」，而这个优势在本项目量级下
+> 不值一处长期密钥 + 一条 GFW 敏感链路。新链路少一个仓库、少一对密钥、少两个外部服务。
+
+#### 5.7.1 本机直出架构
+
+```
+生成（publish/site）→ 写本机静态根 /opt/danmu-intel/site/
+      │
+      ├─ 原子发布：先写 site/.staging/，审计通过后 rename 换入（杜绝半成品对外可见）
+      ├─ 保留上一版：site.prev/ 供秒级回滚
+      ▼
+Caddy（:80/:443，自动 Let's Encrypt 证书，systemd caddy.service）
+      ├─ file_server    → /opt/danmu-intel/site      静态页（HTML / MD / 资源）
+      └─ reverse_proxy  → 127.0.0.1:8080             /api/*（danmu-api.service）
+```
+
+**Caddyfile 全文**（6 行，落在 `deploy/Caddyfile`）：
+
+```caddyfile
+danmupulse.com {
+	root * /opt/danmu-intel/site
+	encode gzip zstd
+	handle /api/* {
+		reverse_proxy 127.0.0.1:8080
+	}
+	file_server
+}
+```
+
+**为什么 Caddy 而不是 nginx**：
+
+| 维度 | Caddy（本设计推荐） | nginx + certbot |
+|---|---|---|
+| HTTPS 证书 | ✅ 内置 ACME，**自动申请 + 自动续期 + 自动 reload** | ⚠️ 需装 certbot + 配 timer + 部署钩子 |
+| 配置量 | 6 行 | 2 个 server 块 + 证书路径 + 续期脚本 |
+| 静态托管 | ✅ `file_server` | ✅ `root` + `try_files` |
+| 反向代理 | ✅ `reverse_proxy` | ✅ `proxy_pass` |
+| HTTP/2、gzip | ✅ 默认开 | 需显式配置 |
+| 单点故障面 | 单二进制 | 二进制 + certbot timer + 钩子脚本 |
+| 生态资料 | 够用 | 极多（团队更熟） |
+| 安装 | 官方 apt 源单包 | 系统包 |
+
+> 结论：**Caddy 把「证书」这个最容易半夜静默失效的环节变成零配置**，同时少一个 timer
+> 和一套钩子脚本，符合 AGENTS.md「最简实现」。nginx 作为等价替代同时提供在
+> `deploy/nginx.conf.example`（含 certbot 续期说明），可零成本切换。
+
+**DNS 前置条件（部署前必须确认）**：`danmupulse.com` 与 `www.danmupulse.com` 的 A/AAAA
+记录须指向 VPS IP；**若当前指向 GitHub Pages / Vercel，必须改指向**，否则 Caddy 无法通过
+ACME 域名校验（这是切换后最容易漏的一步）。
+
+#### 5.7.2 发布流程（原子化 + 自动回滚）
+
+1. 生成到 `site/.staging/`（含全部 HTML / MD / 静态资源；旧模板残留检测在此步）
+2. **发布前审计**（见 §5.7.3）—— 不通过即**中止**，`.staging/` 直接丢弃，`site/` 不动
+3. 若 `site/` 已存在 → `mv site site.prev`（保留上一版）
+4. `mv site/.staging site` —— **同文件系统内原子 rename**，不存在"发布到一半"的中间态
+5. 发布后自检：抓 `/` 与至少 1 个节点页，断言 HTTP 200 且含预期锚点
+6. 自检失败 → **自动 `mv site.prev site` 回滚** + 告警（§5.10）
+
+**发布延迟**：从页面生成到可访问 = 一次 rename（毫秒级）。
+→ **远优于 PRD 的 ≤1 分钟目标**（原链路要经 push + 远端构建）。
+
+#### 5.7.3 发布前审计（保留 PRD 要求，逐条可测）
+
+| # | 审计项 | 不通过的后果 |
+|---|---|---|
+| 1 | 导航唯一（全站同一套导航，无第二份模板） | 中止发布 |
+| 2 | 无旧模板残留 | 中止发布 |
+| 3 | Pro 页付费墙齐全（按「比赛是否已结束」判定，非文件名） | 中止发布 |
+| 4 | 节点完整性（`matches.json` 声明的节点 ↔ 实际文件一一对应） | 中止发布 |
+| 5 | 页面 × 联赛 × slug 关联一致 | 中止发布 |
+| 6 | 速览卡残留 = 0 | 中止发布 |
+| 7 | **（新增）内部链接可达性**：全站链接不得 404（本地目录校验） | 中止发布 |
+| 8 | **（新增）`site.prev` 存在且可回滚** | 告警（首次发布豁免） |
+
+#### 5.7.4 回滚
+
+- **秒级**：`mv site.prev site`（自动或手动）
+- **分钟级**：页面可从 DB / 切片 / 规则层**重新生成**（生成脚本幂等）
+- **审计记录**：每次发布的审计结果落 `runtime/publish_audit.jsonl`（谁、何时、通过与否、回滚与否）
+
+#### 5.7.5 验收标准
+
+- [ ] 站点由本机 Caddy 直出，**零外部部署依赖**（无站点仓库 / 无 GitHub Pages / 无 Vercel / 无 Deploy Key）
+- [ ] `grep -rn 'git push\|github_deploy\|Deploy Key\|vercel' src/ deploy/` = 0 命中
+- [ ] 发布为原子 rename，杜绝半成品对外可见
+- [ ] 发布自检失败自动回滚到 `site.prev`，且产生告警
 - [ ] 比赛结束 → 该场全部节点页转免费公开
 - [ ] 付费墙按「比赛是否已结束」判定
-- [ ] 审计不通过 = 不发布
-- [ ] 发布链路 ≤1 分钟
-- [ ] 异常时保留上一版站点
+- [ ] 审计不通过 = 不发布（有测试：故意注入旧模板 → 发布被拒）
+- [ ] 发布到可访问 ≤10 秒
+- [ ] HTTPS 证书自动续期，续期失败有告警
+- [ ] `danmupulse.com` DNS 指向 VPS（写进部署自检清单）
 
 ---
 
@@ -1325,14 +1432,19 @@ def can_publish_endgame(signals: dict) -> bool:
 
 | 层 | 路由 | 方法 | 鉴权 | 数据落点 / 来源 | 调用方 |
 |---|---|---|---|---|---|
-| VPS `stats_server.py`（:8080，systemd `stats-server.service`） | `/track` | POST | header `X-Stats-Secret` | 追加 `runtime/stats/events.jsonl` | Vercel 转发 |
-| 同上 | `/lead` | POST | header `X-Stats-Secret` | 追加 `runtime/leads.jsonl` | Vercel 转发 |
-| 同上 | `/stats` | GET | `?secret=` | 只读聚合 | 站长 / 后台 |
-| 同上 | `/leads` | GET | `?secret=` | 只读明细 | 站长 / 后台 |
-| 同上 | `/members` | GET | `?secret=` | 只读 `members.json` | 付费墙 |
-| Vercel `danmu-intel-api.vercel.app` | `/api/track` | POST | **公开** | → VPS `/track` | 页面打点脚本 |
-| Vercel | `/api/lead` | POST | **公开** | → VPS `/lead` + 推 TG | 订阅表单 |
-| Vercel | `/api/verify-member` | POST | **公开** | 读 `members.json` | 付费墙弹窗 |
+| **本机 Caddy** | `/api/*` | — | — | 反代 → `127.0.0.1:8080`（**唯一对外入口**） | 浏览器 |
+| `danmu-api.service`（:8080，**只监听 127.0.0.1**） | `/track` | POST | header `X-Stats-Secret` | 追加 `runtime/stats/events.jsonl` | Caddy 反代 |
+| 同上 | `/lead` | POST | header `X-Stats-Secret` | 追加 `runtime/leads.jsonl` | Caddy 反代 |
+| 同上 | `/stats` | GET | header `X-Stats-Secret` | 只读聚合 | 站长 / 后台 |
+| 同上 | `/leads` | GET | header `X-Stats-Secret` | 只读明细 | 站长 / 后台 |
+| 同上 | `/members` | GET | header `X-Stats-Secret` | 只读 `members.json` | 付费墙 |
+| 同上（对外同源 `/api/track`） | `/track` | POST | 公开（**须限流**） | 同上 | 页面打点脚本 |
+| 同上（对外同源 `/api/lead`） | `/lead` | POST | 公开（**须限流**） | 同上 + 推 TG | 订阅表单 |
+| 同上（对外同源 `/api/verify-member`） | `/verify-member` | POST | 公开 | 读 `members.json` | 付费墙弹窗 |
+
+> **外部依赖 = 0**：不再有 Vercel / GitHub Pages。所有 `/api/*` 由本机 `danmu-api.service`
+> 承载，Caddy 转发并终结 TLS（§5.7.1）。页面打点脚本改走**同源相对路径** `/api/track` ——
+> 顺带消灭了跨域（CORS）与硬编码外部域名两个问题。
 
 `stats_server.py` 是零依赖 `ThreadingHTTPServer`（标准库），默认端口 8080，无框架。
 
@@ -1351,7 +1463,8 @@ tools/add_paywall.py        ← 只是调用方
 
 → 这直接回答「verify-member 是给谁用的」：**给付费墙弹窗用的**（客户端 `fetch`），
 调用方是**浏览器里的访客**，鉴权 = **无**（凭 `identifier` 查名单）。
-→ 本设计必须把它**收回本仓库**（见 §15.6）。
+→ 本设计**取消 Vercel，改由本机 `danmu-api.service` 承载**（见 §15.6 / ADR-0006），
+顺带把这份游离代码**收回本仓库** —— 一举两得。
 
 **② `GET` 类接口的 secret 走 URL query**（`/stats?secret=...`），会进 access log。
 → 设计改为**统一走 header**。
@@ -1416,7 +1529,7 @@ body: {"name":"...","contact":"...","plan":"...","note":"..."}
 
 **`GET /members?secret=`** —— 会员名单（读 `members.json`；缺失返回 `{"members": []}`）
 
-**`POST /api/verify-member`**（Vercel 端，本设计收回本仓库）
+**`POST /api/verify-member`**（**本机 `danmu-api.service` 承载**；蓝本原在 Vercel 端，本设计收回本仓库并本机化）
 
 ```json
 请求  {"identifier": "<TG用户名或QQ号>"}
@@ -1433,10 +1546,10 @@ body: {"name":"...","contact":"...","plan":"...","note":"..."}
 ```text
 ① 页面注入脚本（tools/add_stats_track.py 注入到所有 HTML 的 </body> 前）
    ├─ 访客 ID：localStorage["di_v"]，首次访问生成 crypto.randomUUID()，之后复用
-   └─ fetch POST https://danmu-intel-api.vercel.app/api/track
+   └─ fetch POST /api/track                     ← 同源相对路径（无跨域、无硬编码域名）
         {page: location.pathname, visitor: v}      ← catch 静默失败，不阻塞页面
-② Vercel /api/track 中转（附 X-Stats-Secret）
-③ VPS stats_server.py /track → 追加 runtime/stats/events.jsonl
+② Caddy 反代 → 本机 danmu-api.service `/track`（终结 TLS）
+③ 追加 runtime/stats/events.jsonl
 ```
 
 **PV / UV 定义**：
@@ -1494,6 +1607,8 @@ body: {"name":"...","contact":"...","plan":"...","note":"..."}
 
 #### 5.11.4 验收标准
 
+- [ ] 所有 `/api/*` 由本机承载，**零外部依赖**（无 Vercel / GitHub Pages / 站点仓库）
+- [ ] 页面打点走同源 `/api/track`（无硬编码外部域名、无 CORS 依赖）
 - [ ] `verify-member` 实现收回本仓库（消灭游离代码），有单元测试
 - [ ] 所有 `GET` 类接口鉴权走 header，不再用 URL query
 - [ ] `/track`、`/lead` 有速率限制；超限返回 429 且有测试
@@ -1530,14 +1645,22 @@ body: {"name":"...","contact":"...","plan":"...","note":"..."}
 
 ### 6.2 存储约定
 
-- 原始弹幕 JSONL 只增不改，按 平台/日期 落盘
-- 切片 JSONL 按 match_slug_g{game}_{phase} 命名
-- 规则层 intel.json 与切片一一对应
-- 状态文件（runtime/events/、runtime/vps_intel/）幂等：存在即跳过
-- matches.json 为比赛元数据权威，result_inferred 结算后回填（含比分 3:2 等）
-- SQLite 存结构化库（matches/teams/players/gray/bp/leagues/knowledge/assets/payments/subscriptions/sources/users）
-- JSONL/JSON 存切片与状态，MD 存知识库与镜像
-- 后台管理员配置通过 Web UI 写入 DB（sources、users 表），不读本地 config
+**存储分层（唯一权威表述；数据资产完整清单见 §6.4）**：
+
+- **JSONL 文件**：仅两类 —— 原始弹幕（`data/danmu/<platform>/<date>_<source>.jsonl`，只增不改，
+  一次采集机会）+ 切片（`data/danmu/slices/<match>/{all,game_N}.jsonl`，可从原始层重切）
+- **SQLite**：
+  - 结构化档案 `matches` / `teams` / `players` / `gray` / `bp` / `leagues` / `knowledge` / `assets`
+  - 状态幂等（原 `runtime/events/`、`runtime/vps_intel/` 语义 → `job_state` 表）
+  - 统计落点 `site_events` / `leads` / `price_snapshots`
+  - 付费 `payments` / `subscriptions` / `payment_addresses`；以及 `sources` / `users`
+  - **无 schema 的散 JSON 统一进 `intel_asset(kind, id, doc, updated_at)`**
+- **文件（不入库）**：配置（人工编辑 + git diff 审计）、JSON Schema（代码资产）、静态资源
+- MD 存知识库与镜像
+- **DB 是派生视图**：删 DB 只降速不丢数据（重建脚本 + 测试，见 §5.2.5 / §6.4.2）
+- `matches` 表为比赛元数据权威，`result_inferred` 结算后回填（含比分 3:2 等）
+- 后台管理员配置通过 Web UI 写入 DB（`sources`、`users` 表），不读本地 config
+- **临时产物**（`/tmp/*.json`、`resp.json`、`r.json`）一律不入库，`.gitignore` 覆盖
 
 ### 6.3 目录结构（目标工程）
 
@@ -1564,11 +1687,145 @@ danmu-intel/
 │   └── api/                     # API（verify_member/lead/stats）
 ├── prompts/                     # 固定提示词（report_full/game/pre/live/asset）
 ├── data/                        # 运行时数据（切片/规则 JSON/状态）
-├── reports/                     # 输出情报页（HTML+MD）
+├── site/                        # ★ 静态根（发布产物，Caddy 直出；.gitignore）
+├── site.prev/                   # ★ 上一版站点（回滚用；.gitignore）
+├── reports/                     # 中间产物情报页（HTML+MD，发布时拷入 site/）
 ├── runtime/                     # 状态/日志/成本记录
 ├── tests/                       # 回归测试（含今日教训用例）
-└── deploy/                      # systemd units / 部署脚本 / nginx 配置
+└── deploy/                      # systemd units / Caddyfile / 部署剧本（无站点推送脚本）
 ```
+
+---
+
+### 6.4 数据资产全景与统一入库方案（★ 用户问「扫描还有哪些数据是 json/jsonl，能否统一入库」）
+
+> **决策记录**：ADR-0007（分层统一入库 —— SQLite 为档案与统计权威，JSONL 只留原始层）。
+> **执行口径**：本节的清单即唯一权威；新增任何 json/jsonl 产物必须先在本节登记归属层级。
+
+**扫描方法（可复现）**：
+
+```bash
+cd <repo>
+# ① 仓库内实存文件
+find . \( -name '*.json' -o -name '*.jsonl' \) \
+     -not -path './.git/*' -not -path './vendor/*' -not -path './node_modules/*' \
+  | sed 's|/[^/]*$||' | sort | uniq -c
+# ② 代码/文档里"引用到"的路径（含运行时产物，仓库内可能不存在）
+grep -rhoE '[\w./{}-]{0,80}\.(jsonl|json)' tools/ knowledge/ docs/ schemas/ | sort | uniq -c
+```
+
+**实测结果**：仓库内实存 **217 个** `<b>.json/.jsonl</b>` 文件；代码与文档中引用 **277 处**路径
+（差额即为「运行时产物」——它们在 VPS 运行时生成，不进仓库）。
+分布（前 10）：`docs/data/intel/node_data/` **187**、`docs/data/intel/` **25**、
+`knowledge/` **8**、`schemas/` **6**、`config/` **4**、`tools/` **1**、`deploy/danmu_server/` **1**。
+
+#### 6.4.1 完整清单（按「数据性质」分 7 类，决定各自归属）
+
+**① 流式证据（JSONL，append-only）—— 8 组**
+
+| 路径 | 内容 | 建议 |
+|---|---|---|
+| `data/danmu/<platform>/<date>_<source>.jsonl` | **原始弹幕**（一行一条） | **保留文件**（见 6.4.2 理由）+ 可选镜像入库 |
+| `data/danmu/slices/<match>/{all,game_N}.jsonl` | 切片 | **保留文件**（可从原始层重切） |
+| `data/intel/price_snapshots.jsonl` | 盘口价格快照 | **入 DB**（体量小、需按时间窗查） |
+| `runtime/stats/events.jsonl` | 站点打点 | **入 DB**（需聚合/排行/漏斗） |
+| `runtime/leads.jsonl` | 订阅留痕 | **入 DB**（需按 ts 查、需与身份关联） |
+| `runtime/markers/YYYY-MM-DD.jsonl` | 标记 | **入 DB** |
+| `runtime/bar_monitor_state/*__window.jsonl` | 盘口窗口状态 | **入 DB** |
+| `runtime/forensics/scan_*.jsonl`、`runtime/observe_*.jsonl`、`{slug}_live_*.jsonl` | 观测/取证 | **入 DB**（或按需保留） |
+
+**② 结构化档案（JSON，有固定字段 + 需 upsert）—— 46 份 → 全部入 DB**
+
+- `docs/data/intel/` **25 份**：`matches` `teams` `players` `graph` `match_index` `gray_signals`
+  `price_paths` `bp_signals` `gray_entities` `champions` `predictions` `aliases` `leagues`
+  `team_names` `users` `rosters` `compositions` `matchups` `maps` `bp_entities`
+  `validation_samples` `streamer_profiles` `patches` `commenters` …
+- `docs/data/intel/node_data/` **187 份**：`<date>_<a>_<b>_g<N>_{pre,bp,review}.json`
+- `docs/data/intel/official/official_matches.json`
+- `knowledge/intel_signals.json`（+ `schemas/intel_signal.schema.json` 契约）
+- `knowledge/{team,player,league}_profiles.json`、`knowledge/edges.json`、`knowledge/streamer_registry.json`
+
+**③ 状态 / 幂等（JSON，小型，进程间协调）—— 30+ 份 → 全部入 DB**
+
+`runtime/danmu_sessions/<session>/{intel.json,<source>.status.json}`、
+`runtime/vps_intel/<match>.json`、`runtime/vps_intel/self_check_report.json`、
+`runtime/events/<幂等键>.json`、`runtime/match_management/<slug>.json`、
+`runtime/{intel_today,matches_today,accumulated_matches,comment_intel,game_status,health,watchlist_events}.json`
+
+**④ 配置（JSON，人工维护）—— 15 份 → 保留文件**
+
+`config/{danmu_sync,streamers,leagues,affiliate,market_watchlist,risk_limits,forensics_arb,strategy_templates,discovery_patterns}.json`
+
+> **为什么不入库**：配置文件的价值在于**人工编辑 + git diff 审计 + code review**。
+> 入库后编辑要写 SQL、变更无 diff、无法 review —— 是倒退。
+> **唯一例外**：**数据源配置**（§5.1.1）必须走 DB，因为要让管理员在 Web 后台热改。
+
+**⑤ 契约（JSON Schema）—— 6 份 → 保留文件**
+
+`schemas/{intel_signal,team_profile,player_profile,trade_config,opportunity_candidate,arb_cycle}.schema.json`
+→ 它们是**代码资产**（约束校验），不是数据。
+
+**⑥ 生成物索引 / 派生视图 —— 入 DB 或直接删**
+
+`docs/data/danmu/streamer_registry.json`、`runtime/intel_today.json`、`runtime/matches_today.json`、
+`reports/morphology_census_*.json`
+→ 全部可从上游重建；**入 DB 作为缓存，不作 ground truth**。
+
+**⑦ 临时产物 —— 一律不入库，且应清理**
+
+`/tmp/danmu.json`、`/tmp/huya_957_live_records.json`、`resp.json`、`r.json`
+→ 脚本调试遗留物，`.gitignore` 覆盖 `resp.json` / `r.json` / `/tmp`。
+
+#### 6.4.2 「能否统一存入数据库」—— 能，但不是「全塞一个库」
+
+**三个方案的对比**：
+
+| 方案 | 做法 | 优点 | 缺点 |
+|---|---|---|---|
+| **A 全量入库** | 原始弹幕也进 SQLite | 真正单一存储 | DB 膨胀；**丢失行级隔离**（一行坏拉垮整批）；备份/迁移变重；`grep`/`diff`/`wc` 审计能力失效；原始证据的「不可变」难以证明 |
+| **B 分层统一（✅ 本设计采用）** | **档案 + 状态 + 统计 + 打点 + 索引 全部入 SQLite**；**原始弹幕与切片保留 JSONL 文件**；**配置与 Schema 留文件** | 消灭 90% 的散落 JSON；保留原始证据不可变性与可审计性；DB 可重建 | 仍存两类存储（但边界清晰、可判定） |
+| C 只入统计层 | 仅统计入库 | 改动最小 | 散落 JSON 问题基本没解决 |
+
+**B 方案的三条铁律**：
+
+1. **DB 是派生视图，不是 ground truth**
+   → 原始 JSONL 永远可重放；**删掉 DB 只降速、不丢数据**（配重建脚本 + 测试，见 §5.2.5 验收）。
+2. **一实体一表；无 schema 的散 JSON 进通用表**
+   → 有明确实体的：`matches` / `teams` / `players` / `leagues` / `bp_signals` / `gray_signals` /
+   `node_data` / `payments` / `subscriptions` / `sources` / `users` 各建表；
+   → 无 schema 的杂项：统一进 `intel_asset(kind TEXT, id TEXT, doc JSON, updated_at)`，
+     既满足"统一入库"，又不为每个杂项硬造表结构（符合 AGENTS.md「不要投机抽象」）。
+3. **配置与 Schema 不入库** —— 留文件走 git review（例外：`sources` 表见 §5.1.1）。
+
+**统一后消除的具体问题**（蓝本实测）：
+- 蓝本同一个「联赛默认采集集」在 `config/leagues.json`、`knowledge/leagues/*`、
+  `docs/data/intel/leagues.json` **三处各存一份** → 统一后**单一来源**，消除漂移。
+- 蓝本 `matches.json` 与 `runtime/matches_today.json` 字段重复但口径不同 → 统一后
+  `matches` 表为权威，`matches_today` 变视图。
+
+#### 6.4.3 存储分层总表（替代先前散落表述）
+
+| 数据类型 | 存储 | 是否可重建 | append-only |
+|---|---|---|---|
+| 原始弹幕 | **JSONL 文件** | 否（一次采集机会） | ✅ 永不改写 |
+| 切片 | **JSONL 文件** | ✅（从原始层重切） | ✅ |
+| 盘口快照 / 打点 / 留痕 | **SQLite** | 否（原始事件） | ✅（只插入） |
+| 结构化档案（mes/teams/players/…） | **SQLite** | ⚠️ 部分（LLM 回填不可重现） | ❌（upsert） |
+| 节点情报 node_data | **SQLite** | ⚠️ 部分 | ❌（upsert） |
+| 状态 / 幂等 | **SQLite** | ✅ | ❌ |
+| 生成物索引 | **SQLite** | ✅ | ❌ |
+| 配置 | 文件 | — | ❌ |
+| Schema | 文件 | — | ❌ |
+| 临时产物 | 不入库 | — | — |
+
+#### 6.4.4 验收标准
+
+- [ ] 除「原始弹幕 / 切片 / 配置 / Schema」外，仓库内**零散落 JSON**（CI 扫描门禁）
+- [ ] DB 重建脚本存在，且「删 DB → 全量重建 → 数据一致」有测试
+- [ ] `intel_asset(kind,id,doc,updated_at)` 表可容纳无 schema 的散 JSON
+- [ ] 联赛采集集等重复定义收敛为**单一来源**（有回归测试防再分裂）
+- [ ] 临时产物不入库，`.gitignore` 覆盖 `resp.json` / `r.json`
+- [ ] 本节的清单与实际文件**一一对应**（脚本可校验，清单过期即 CI 失败）
 
 ---
 
@@ -1582,7 +1839,7 @@ danmu-intel/
 | LLM | DeepSeek API（OpenAI 兼容接口，provider 可替换） |
 | 存储 | SQLite（结构化库）+ JSONL/JSON（切片与状态）+ MD（知识库） |
 | 调度 | systemd service + timer（事件钩子 + 定时兜底） |
-| 站点 | 静态页生成 + GitHub Pages / nginx |
+| 站点 | 静态页生成 + **本机 Caddy 直出**（零外部部署依赖） |
 | 通知 | Telegram Bot API |
 | 测试 | pytest + 回归测试集 |
 | 部署 | uv/venv + systemd + git 同步 |
@@ -1643,13 +1900,16 @@ danmu-intel/
 | danmu-session.service | 采集常驻（按直播间注册表自动启停） |
 | danmu-intel-pipeline.timer | 管线每 10 分钟兜底 + 事件钩子 |
 | danmu-publish.timer | 发布每 5 分钟（含审计） |
-| danmu-api.service | 对外 API（verify-member / lead / stats，8080） |
-| nginx | 站点反代 / 静态托管（或 GitHub Pages） |
+| danmu-api.service | 本机 API 服务（verify-member / lead / track / stats，**只监听 `127.0.0.1:8080`**） |
+| caddy.service | **唯一对外入口**：TLS（自动 Let's Encrypt）+ `file_server` 静态直出 + `/api/*` 反代 |
+
+> **零外部依赖**：无站点仓库、无 GitHub Pages、无 Vercel、无 Deploy Key
+> （见 §5.7 发布层 / §9.5 站点承载 / ADR-0006）。
 
 ### 9.2 环境与密钥
 
 - `DEEPSEEK_API_KEY`（生成端）
-- GitHub Deploy Key（站点推送）
+- ~~GitHub Deploy Key（站点推送）~~ → **已废弃**（站点改本机直出；长期密钥只剩 2 个，见 §9.5.3）
 - Telegram Bot Token / Chat ID（订阅提醒与告警）
 - 所有密钥仅存服务器，权限 600；不入库不提交
 - 兼容旧 `~/.codex/config.toml` 中的 DeepSeek 配置（迁移期）
@@ -1695,12 +1955,89 @@ python -m danmu_intel.publish deploy --check
 
 ---
 
-### 9.5 站点推送与 Deploy Key（★ 用户问「GitHub Deploy Key 是干什么的」）
+### 9.5 站点承载与 TLS（本机直出，★ 已废弃 Deploy Key / 外部站点）
 
-**蓝本真实实现**——`tools/commit_site_pages.sh`（399 B，全文抄录）：
+**本节依据用户 2026-09-22 指令重写**：
+
+> 「不要将生成好的页面再推到其它站点，而是当前服务器内部解决页面部署问题，不再依赖其它站点」
+
+#### 9.5.1 旧链路为什么被废弃（保留取证，供后人理解历史）
+
+蓝本 `tools/commit_site_pages.sh`（399 B，全文抄录）——这条链路**已废弃**：
 
 ```bash
 #!/bin/bash
+# 服务器端：把 site_repo 中指定页面提交并推送（deploy key）。
+# 用法：bash tools/commit_site_pages.sh "提交说明" file1 file2 ...
+set -euo pipefail
+cd /opt/danmu-intel/site_repo
+export GIT_SSH_COMMAND="ssh -i /root/.ssh/github_deploy -o StrictHostKeyChecking=accept-new"
+git add "${@:2}"
+git commit -m "$1" -q
+git push -q origin main
+echo "committed and pushed"
+```
+
+| 概念 | 旧链路的角色 | 现状 |
+|---|---|---|
+| **GitHub Deploy Key** | 一对 SSH 密钥；公钥作为 Deploy Key 挂在**站点仓库**（`site_repo`）设置里，私钥在服务器 `/root/.ssh/github_deploy`。作用 = 让服务器有权 `git push` 页面 | **不再需要**（无站点仓库） |
+| **站点仓库 `site_repo`** | 独立于代码仓库的生成物仓库，避免每日报告污染代码 diff | **取消** |
+| **GitHub Pages / Vercel** | 收到 push 后构建并对外提供站点 | **取消**，改本机 Caddy |
+
+**废弃理由**：这套链路为了「自动化发布」付出了 **1 个额外仓库 + 1 对长期密钥 + 2 个外部服务 +
+1 条 GFW 敏感网络链路**，而它解决的问题（把文件放到能被访问的地方）在本机一条 rename 就够。
+
+#### 9.5.2 新链路：本机 Caddy 直出
+
+**组件**：`caddy.service`（:80/:443，自动 ACME 证书）→ 静态根 `/opt/danmu-intel/site`
+→ `/api/*` 反代 `127.0.0.1:8080`（`danmu-api.service`）。
+完整配置与理由见 **§5.7.1**（Caddyfile 全文 6 行）。
+
+**部署步骤（本机，无外部依赖）**：
+
+| # | 步骤 | 命令 / 校验 |
+|---|---|---|
+| 1 | 装 Caddy | 官方 apt 源；`caddy version` 有输出 |
+| 2 | 放配置 | `cp deploy/Caddyfile /etc/caddy/Caddyfile`；`caddy validate --config /etc/caddy/Caddyfile` |
+| 3 | **DNS 指向本机** | `dig +short danmupulse.com` **必须**是本 VPS IP（若仍指向 GitHub Pages/Vercel，先改 DNS —— 这是切换最易漏的一步） |
+| 4 | 建静态根 | `mkdir -p /opt/danmu-intel/site`，属主 `danmu`，权限 `755` |
+| 5 | 起服务 | `systemctl enable --now caddy`；`ss -lntp \| grep -E ':(80\|443)'` |
+| 6 | 验证书 | `curl -sI https://danmupulse.com \| head -1` → `HTTP/2 200`；`openssl s_client -connect danmupulse.com:443` 证书issuer 含 Let's Encrypt |
+| 7 | 验反代 | `curl -s https://danmupulse.com/api/stats?page=/` 有 JSON 响应 |
+| 8 | 防火墙 | 仅开 22/80/443；**8080 只监听 127.0.0.1**，不对公网开放 |
+
+**TLS 续期**：Caddy 内置 ACME **自动续期**（到期前 30 天起尝试），无需 timer。
+→ 但**必须监控续期失败**：`journalctl -u caddy | grep -i 'certificate'` 有异常即告警（§5.10）。
+→ 端口 80 必须保持可达（ACME HTTP-01 校验依赖它），**不能**只在 443 上开站。
+
+#### 9.5.3 密钥面收敛（本设计的直接收益）
+
+**废除 Deploy Key 后，本项目的长期凭据只剩 2 个**：
+
+| 凭据 | 用途 | 存放 | 轮换 |
+|---|---|---|---|
+| `DEEPSEEK_API_KEY` | LLM 提炼 | 环境变量 / systemd `EnvironmentFile`，权限 600 | 平台侧吊销重发 |
+| `TELEGRAM_BOT_TOKEN` + `CHAT_ID` | 订阅提醒与告警 | 同上 | BotFather 撤销 |
+| `DANMU_INTEL_ADMIN_TOKEN` | 首个管理员注册（一次性） | 环境变量，注册后即可移除 | 一次性 |
+| ~~GitHub Deploy Key~~ | ~~站点推送~~ | — | **已废弃** |
+
+**CI 门禁**（§11.0 覆盖）：
+- [ ] `grep -rn 'BEGIN OPENSSH PRIVATE KEY' .` = **0 命中**
+- [ ] `grep -rn 'github_deploy\|Deploy Key\|site_repo\|git push' src/ deploy/` = **0 命中**
+- [ ] `.gitignore` 覆盖 `.env`、`*.pem`、`id_*`、`site/`、`site.prev/`
+
+#### 9.5.4 验收标准
+
+- [ ] 站点由本机 Caddy 直出；**全链路零外部部署依赖**
+- [ ] `danmupulse.com` DNS 指向 VPS，且写入部署自检
+- [ ] Caddy 证书自动续期；**续期失败有告警**（不是静默）
+- [ ] 8080 只监听 `127.0.0.1`（不对公网暴露）
+- [ ] 防火墙仅开 22/80/443（80 必须开，ACME 依赖）
+- [ ] 仓库内零 SSH 私钥；零 `site_repo` / `github_deploy` / `vercel` 引用
+- [ ] 新服务器从零到站点可访问 ≤ 30 分钟（部署剧本可复现）
+
+---
+
 # 服务器端：把 site_repo 中指定页面提交并推送（deploy key）。
 # 用法：bash tools/commit_site_pages.sh "提交说明" file1 file2 ...
 set -euo pipefail
@@ -1869,7 +2206,11 @@ pytest 全绿 → 覆盖率 ≥90% → 生成页结构门禁 → 事实层官方
 14. 支付模块：支持 Polygon + Solana 两条链
 15. **站点统计**：PV/UV 可按 `site` 与 `page` 维度查询；付费页漏斗（PV → lead → 解锁）可查；
     匿名访客口径如实标注「匿名 UUID，非实名」（见 §5.11.3）
-16. **密钥卫生**：仓库内零私钥（Deploy Key / 钱包密钥 / API Key），CI 扫描门禁；所有敏感值走环境变量（见 §9.5.2）
+16. **密钥卫生**：仓库内零私钥（钱包密钥 / SSH 私钥 / API Key），CI 扫描门禁；所有敏感值走环境变量（见 §9.5.3）
+17. **零外部部署依赖**：站点由本机 Caddy 直出，无站点仓库 / 无 GitHub Pages / 无 Vercel /
+    无 Deploy Key；发布为原子 rename，失败自动回滚（见 §5.7 / §9.5 / ADR-0006）
+18. **数据统一入库**：除「原始弹幕 / 切片 / 配置 / Schema」外零散落 JSON；DB 可由
+    JSONL + JSON 全量重建；`intel_asset` 承载无 schema 的散 JSON（见 §6.4）
 
 ---
 
@@ -1942,33 +2283,81 @@ payment:
 
 ---
 
-#### 15.6 付费链路代码收回（消灭游离实现）
+#### 15.6 站点与付费链路的本机化（消灭游离实现 + 消灭外部依赖）
 
-**问题**：`POST /api/verify-member` 的实现不在蓝本仓库内（`grep -rln "verify-member"` 全仓库
-只命中文档与调用方 `tools/add_paywall.py`），实际代码在 Vercel 项目
-`danmu-intel-api.vercel.app` 里，而蓝本**没有 `api/` 目录、没有 `vercel.json`**。
-后果：付费链路**一半代码不在版本控制内**，无法 code review、无法回归测试、
-无法与 `members.json` 的写入逻辑（VPS 侧）做跨端一致性校验。
+**本节依据用户 2026-09-22 两条指令改写**：
 
-**处置**：把 Vercel 端的 3 个 serverless function 一并纳入本仓库：
+> 「不要将生成好的页面再推到其它站点，而是当前服务器内部解决页面部署问题，不再依赖其它站点」
+>
+> （前序）「对外 API（verify-member / lead / stats）这些接口是给谁用的？」
+
+**要处置的是两个问题，不是一个**：
+
+**问题 1（代码游离）**：`POST /api/verify-member` 的实现不在蓝本仓库内
+（`grep -rln "verify-member"` 全仓库只命中文档与调用方 `tools/add_paywall.py`），
+实际代码在 Vercel 项目 `danmu-intel-api.vercel.app` 里，而蓝本**没有 `api/` 目录、
+没有 `vercel.json`**。后果：付费链路**一半代码不在版本控制内** —— 无法 code review、
+无法回归测试、无法与 `members.json` 的写入逻辑（本机侧）做跨端一致性校验。
+
+**问题 2（外部依赖）**：站点经「`site_repo` + Deploy Key → GitHub Pages / Vercel」
+对外提供。这条链路上有 **1 个额外仓库 + 1 对长期密钥 + 2 个外部服务**，且受网络干扰
+（本项目多次实测推送出现 TLS 握手失败）。用户已明确要求不再依赖其它站点。
+
+**处置：取消 Vercel 与站点仓库，站点与 API 全部由本机承载。**
 
 ```
 danmu-intel/
-├── api/                    ← 新增：Vercel Serverless Functions
-│   ├── track.js            # POST → 转发 VPS /track
-│   ├── lead.js             # POST → 转发 VPS /lead + 推 TG
-│   └── verify-member.js    # POST → 读 members.json 判定
-├── vercel.json             ← 新增：路由与构建配置
+├── src/danmu_intel/api/         ← 取消 Vercel，改本机 HTTP 服务承载
+│   ├── server.py                # ThreadingHTTPServer :8080（只监听 127.0.0.1）
+│   ├── routes/
+│   │   ├── track.py             # POST /track
+│   │   ├── lead.py              # POST /lead（+ 推 TG）
+│   │   ├── verify_member.py     # POST /verify-member
+│   │   └── stats.py             # GET /stats /leads /members
+│   └── ratelimit.py             # /track、/lead 公开接口限流
+├── deploy/Caddyfile             ← 唯一对外入口：TLS + file_server + /api/* 反代
+├── site/                        ← 静态根（发布产物；.gitignore）
+└── site.prev/                   ← 上一版站点（回滚用；.gitignore）
 ```
 
-**接口契约不变**（对外行为与蓝本一致，见 §5.11.2），只是把实现搬进仓库。
-`members.json` 的**唯一写入方**必须是 VPS 的支付模块（§15.3），Vercel 端**只读**。
+对外路由**由 Caddy 统一加 `/api` 前缀**（`handle /api/*` + `uri strip_prefix /api`），
+所以浏览器侧仍是 `/api/track`、`/api/lead`、`/api/verify-member` —— **对前端契约零破坏**，
+与蓝本 `tools/add_paywall.py` 的 `fetch("/api/verify-member")` 完全兼容，且变成**同源相对路径**。
+
+**收益**：
+
+| # | 收益 | 量化 |
+|---|---|---|
+| 1 | 付费链路 100% 可 review、可测试 | 4 个路由进单元测试覆盖 |
+| 2 | 外部依赖归零 | 1 仓库 + 2 服务 + 1 密钥 → **0** |
+| 3 | 发布延迟 | push + 远端构建（数十秒）→ **原子 rename（毫秒）** |
+| 4 | 消灭跨域 | 打点/订阅改同源，无 CORS、无硬编码外部域名 |
+| 5 | 攻击面收敛 | API 服务**只监听 127.0.0.1**，外部只能经 Caddy 443 |
+| 6 | 数据不出境 | 付费与访客数据全部留在本机 |
+
+**边界（必须承认的代价）**：
+
+- **TLS 与可用性自己扛**：无 CDN、无边缘缓存、无平台级 DDoS 兜底；本机宕机 = 站点宕机
+  （v1 接受；后续可加 Cloudflare 前置，但**不引入部署依赖**，只做加速层）
+- **证书续期**：由 Caddy 自动 ACME 完成，但**须有续期失败告警**（§9.5.3）
+- **带宽**：静态页从本机出，受 VPS 带宽约束；`encode gzip zstd` + 长缓存头缓解
+- **`members.json` 并发**：对外**只读**、写入只在支付模块内串行（§15.3），沿用单文件即可；
+  与 §6.4 的统一入库方案对齐时改为 DB 表 `subscriptions`
+
+**接口契约不变**（对外行为与蓝本一致，见 §5.11.2），只是实现从 Vercel 搬进本仓库、
+由本机承载。`members.json` / `subscriptions` 表的**唯一写入方**是本机支付模块。
 
 **验收**：
-- [ ] `api/` 三个 function 在仓库内可见，有单元测试（mock `members.json`）
-- [ ] `vercel.json` 在仓库内，部署配置可复现
-- [ ] `members.json` 只有一处写入方（VPS 支付模块），有静态检查或测试锁定
-- [ ] `verify-member` 的 `expires` 过期判定有边界测试（当天到期 / 已过期 / 无 `expires`）
+- [ ] `track` / `lead` / `verify-member` / `stats` 四个路由实现在仓库内，有单元测试（mock 名单）
+- [ ] 全链路零外部部署依赖：无站点仓库、无 GitHub Pages、无 Vercel
+- [ ] 仓库内 `grep -rn 'vercel\|site_repo\|github_deploy' src/ deploy/ config/` = **0 命中**
+- [ ] `.gitignore` 覆盖 `site/`、`site.prev/`、`*.pem`、`id_*`
+- [ ] API 服务只监听 `127.0.0.1`，外部经 Caddy 443 接入（有真实 `ss -tlnp` 验证）
+- [ ] `/api/verify-member` 过期判定有边界测试（当天到期 / 已过期 / 无 `expires`）
+- [ ] 名单唯一写入方有静态检查或测试锁定
+- [ ] 发布原子 rename + 自检失败自动回滚到 `site.prev`（§5.7.2）
+
+---
 
 ## 16. 已拍板决策
 
