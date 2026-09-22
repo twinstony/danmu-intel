@@ -412,6 +412,7 @@ def test_shutdown_terminates_and_finalizes(conn, data_root):
     harness.supervisor.shutdown()
     assert harness.processes[0].terminated is True
     assert harness.supervisor.runs[0].process is None
+    assert harness.supervisor.runs[0].state == "stopped", "收工后不该显示成还在等重拉"
     row = conn.execute("SELECT * FROM room_sessions WHERE id=?", (session_id,)).fetchone()
     assert row["state"] == "exited" and row["ended_at"] is not None
     assert row["severity"] == "info", "人工收工不是异常"

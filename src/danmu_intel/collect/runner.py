@@ -347,12 +347,9 @@ async def run_session(
     own_conn = conn is None
     conn = conn or db_module.open_db(root / "db.sqlite3")
     try:
-        try:
-            probe: Probe | None = await adapter.probe(room)
-        except Exception as exc:  # 探测失败不影响采集（页面协议变更不得导致停采）
-            logger.warning("【%s/%s】房间探测失败：%s", room.platform, room.room_id, exc)
-            probe = None
-        room_row_id = upsert_room(conn, room, probe)
+        # 先立房间/会话/心跳，再探测：探测最多能耗掉 15 秒 HTTP 超时，心跳晚亮 15 秒会让
+        # 「进程是否活着」这一步失去意义（supervisor 与运维都靠心跳）
+        room_row_id = upsert_room(conn, room, None)
         counts = supervision_state()
         session_id = int(
             conn.execute(
@@ -385,6 +382,16 @@ async def run_session(
         )
         runtime.publish()  # 先亮心跳：supervisor 一启动就能看见这个房间活着
         heartbeat = asyncio.create_task(runtime.run())
+
+        try:
+            probe: Probe | None = await adapter.probe(room)
+        except Exception as exc:  # 探测失败不影响采集（页面协议变更不得导致停采）
+            logger.warning(
+                "【%s/%s】房间探测失败（%s）：%s", room.platform, room.room_id, type(exc).__name__, exc
+            )
+            probe = None
+        if probe is not None:
+            upsert_room(conn, room, probe)  # 主播名/开播状态是探测才知道的，补上
 
         touched: dict[Path, JsonlAppender] = {}
         count = 0

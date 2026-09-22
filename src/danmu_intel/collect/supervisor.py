@@ -225,9 +225,10 @@ class Supervisor:
         for run in self.runs:
             if run.process is None:
                 continue
+            pid = run.pid
             returncode = self._terminate(run)
             self._close_session(run, returncode=returncode, reason="supervisor_shutdown", emit_exit=False)
-            logger.info("【%s/%s】监督收工，已停止子进程 pid=%s", run.room.platform, run.room.room_id, run.pid)
+            logger.info("【%s/%s】监督收工，已停止子进程 pid=%s", run.room.platform, run.room.room_id, pid)
 
     def stopped_rooms(self) -> list[RoomRun]:
         return [run for run in self.runs if run.stopped]
@@ -375,7 +376,8 @@ class Supervisor:
             )
         run.process = None
         run.session_id = session_id
-        run.state = "stopped" if run.stopped else "restarting"
+        # 超限停止与「监督收工」都是 stopped；只有「还要重拉」才是 restarting
+        run.state = "restarting" if emit_exit and not run.stopped else "stopped"
 
     def _terminate(self, run: RoomRun) -> int | None:
         """先 terminate，`KILL_GRACE_S` 内不走就 kill；返回退出码。"""
