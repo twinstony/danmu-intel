@@ -52,6 +52,10 @@ python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资�
 
 `DANMU_INTEL_DATA` / `DANMU_INTEL_SITE` 可覆盖上面两个位置（测试用它指向临时目录）。
 
+`site/matches/1.html` 是 2026-09-22 在本机对虎牙 660000 / 323444 两个直播间做了
+5 分钟真实采集后生成的样例产物；它引用的原始记录在采集机的数据目录里，
+换一台机器跑 `danmu-intel render` 会用当地数据重新生成。
+
 ## 测试
 
 ```bash

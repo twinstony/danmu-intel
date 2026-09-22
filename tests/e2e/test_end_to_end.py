@@ -127,7 +127,7 @@ def test_page_still_complete_when_no_peak(replayed, data_root, site_root, capsys
     capsys.readouterr()
     html = (site_root / "matches" / f"{match_id}.html").read_text(encoding="utf-8")
     assert html.count('<section class="seg ') == 11
-    assert "未出现显著峰值" in html
+    assert "无显著峰值" in html
     assert verify_sources(match_id, data_root=data_root) == []
     metrics = json.loads(
         json.dumps({"sections": html.count('<section class="seg ')})

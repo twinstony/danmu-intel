@@ -163,7 +163,7 @@ def parse_page(page: str) -> tuple[ConnectParams, Probe]:
     fields = {name: _first_match(_NUM_RE % name, page) for name in _PAGE_FIELDS}
     missing = [name for name in ("lYyid", "lChannelId", "lProfileRoom") if fields[name] is None]
     if missing:
-        raise ValueError(f"虎牙房间页缺少字段：{','.join(missing)}（房间可能不存在或页面协议变更）")
+        raise ValueError(f"虎牙房间页缺少字段：{','.join(missing)}（房间未开播、不存在，或页面协议变更）")
     params = ConnectParams(
         room_id=fields["lProfileRoom"] or "",
         uid=int(fields["lYyid"] or 0),

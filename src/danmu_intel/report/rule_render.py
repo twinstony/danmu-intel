@@ -42,10 +42,10 @@ def refs_for(lines: list[RawLine] | tuple[RawLine, ...], facts: MatchFacts) -> t
     return tuple(refs)
 
 
-def _peak_line(game: GameFacts) -> str:
+def _peak_phrase(game: GameFacts) -> str:
     top = game.metrics.get("peak") or {}
     if not top:
-        return "未出现显著峰值（窗口计数未超过均值+3σ，也未超过绝对阈值）"
+        return "无显著峰值（所有窗口均未超过「均值+3σ」与绝对阈值）"
     method = "均值+3σ" if top.get("method") == "mean+3sigma" else "绝对阈值"
     return (
         f"峰值窗口 {format_ts(int(top['t_start']))}（窗口内 {top['count']} 条，"
@@ -60,7 +60,7 @@ def _game_line(game: GameFacts) -> str:
         f"（边界来源：{BOUNDARY_LABELS.get(window.boundary_source, window.boundary_source)}）"
         f"｜弹幕 {game.metrics['danmu_total']['count']} 条"
         f"｜独立发言者 {game.metrics['distinct_users']['count']} 人"
-        f"｜{_peak_line(game)}"
+        f"｜{_peak_phrase(game)}"
     )
 
 
@@ -134,7 +134,7 @@ def body_team_profile(facts: MatchFacts) -> str:
 
 def body_player_profile(facts: MatchFacts) -> str:
     return (
-        f"{INTERPRETATION_MARK}本系统的原始记录**不落明文身份**（设计 §5.2：只存加盐 `user_hash`），"
+        f"{INTERPRETATION_MARK}本系统的原始记录不落明文身份（设计 §5.2：只存加盐用户哈希），"
         "因此无法产出人员级画像，也不做任何点名。"
         f"本场共有 {len(facts.all_lines)} 条弹幕，只用于热度与去重计数，不用于评价个人。"
     )
@@ -178,8 +178,8 @@ def body_outlook(facts: MatchFacts) -> str:
     else:
         busiest = max(facts.games, key=lambda game: int(game.metrics["danmu_total"]["count"]))
         points = (
-            f"① 回看 G{busiest.window.game_no} 的峰值窗口（{_peak_line(busiest)}）："
-            "弹幕密度最高的时刻通常对应比赛的关键事件。"
+            f"① 回看 G{busiest.window.game_no} 的弹幕密度变化：{_peak_phrase(busiest)}；"
+            "密度最高的时刻通常对应比赛的关键事件。"
         )
     return (
         f"{INTERPRETATION_MARK}观察点由事实段推出，不新增事实：{points}"
