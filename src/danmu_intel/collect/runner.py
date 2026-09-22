@@ -395,21 +395,19 @@ async def run_session(
 
         touched: dict[Path, JsonlAppender] = {}
         count = 0
-        last_ts: int | None = None
         state = "exited"
         try:
             async for event in _until_deadline(
                 adapter.stream(room, on_reconnect=runtime.note_reconnect), seconds
             ):
                 event = event.with_match(match_id)
-                path = paths.raw_path(event.platform, event.room_id, event.ts)
+                path = paths.raw_path(event.platform, event.room_id, event.ts, data_root=root)
                 appender = touched.get(path)
                 if appender is None:
                     appender = JsonlAppender(path)
                     touched[path] = appender
                 appender.append(event)
                 count += 1
-                last_ts = event.ts
                 runtime.note_message(event)
         except Exception:
             state = "stalled"

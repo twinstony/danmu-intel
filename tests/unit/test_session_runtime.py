@@ -241,3 +241,22 @@ def test_seal_pending_files_uses_the_given_data_root(tmp_path, data_root):
         row = conn.execute("SELECT * FROM danmu_segments").fetchone()
     assert row["rel_path"].endswith("660000-16.jsonl")
     assert row["msg_count"] == 1 and row["room_session_id"] == 12
+
+
+def test_session_writes_under_the_given_data_root_not_the_env(tmp_path, monkeypatch):
+    """显式数据目录优先：supervisor 给子进程的是它自己的目录（父子必须写同一处）。"""
+    elsewhere = tmp_path / "elsewhere"
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "环境变量指的别处"))
+    with session_db() as conn:
+        result = asyncio.run(
+            run_session(
+                ROOM,
+                adapter=ScriptedAdapter(events(2)),
+                seconds=0.2,
+                conn=conn,
+                data_root=elsewhere,
+                heartbeat_interval=0.02,
+            )
+        )
+    assert result.segments[0].rel_path.startswith("raw/huya/")
+    assert (elsewhere / result.segments[0].rel_path).exists()
