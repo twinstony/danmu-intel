@@ -1,8 +1,11 @@
 """SQLite 建库与连接（ADR-0002：stdlib `sqlite3`，WAL 模式，无 ORM）。
 
-T1 只用设计 §5.1 里的六张表：`matches` / `rooms` / `room_sessions` /
-`danmu_segments` / `slices` / `metrics`。其余表随对应能力（T2 起）再加，
-**不预留空表**。
+表按能力分批加，**不预留空表**：T1 是 `matches` / `rooms` / `room_sessions` /
+`danmu_segments` / `slices` / `metrics` 六张；T2 加 `notifications`（采集异常事件
+的出口，投递由 T11 接）。
+
+新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
+开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
 """
 
 from __future__ import annotations
@@ -30,8 +33,11 @@ CREATE TABLE IF NOT EXISTS rooms(              -- 直播间（采集目标）
 CREATE TABLE IF NOT EXISTS room_sessions(      -- 一次采集会话（进程级）
   id INTEGER PRIMARY KEY, room_id INTEGER NOT NULL, match_id INTEGER,
   pid INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER,
-  state TEXT NOT NULL,           -- running|exited|stalled|no_stream
-  restart_count INTEGER NOT NULL DEFAULT 0, last_msg_at INTEGER);
+  state TEXT NOT NULL,           -- connecting|running|stalled|no_stream|exited
+  restart_count INTEGER NOT NULL DEFAULT 0,   -- 房间第几次重启（supervisor 给）
+  reconnects INTEGER NOT NULL DEFAULT 0,      -- 本会话累计重连次数
+  severity TEXT NOT NULL DEFAULT 'info',      -- info|warning|critical
+  last_msg_at INTEGER);
 
 CREATE TABLE IF NOT EXISTS danmu_segments(     -- 落盘文件索引（证据链）
   id INTEGER PRIMARY KEY, room_session_id INTEGER NOT NULL,
@@ -50,6 +56,12 @@ CREATE TABLE IF NOT EXISTS metrics(            -- 规则统计产物（可重算
   id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL, game_no INTEGER,
   metric_key TEXT NOT NULL,      -- density_curve|peak|score|kill_timeline|...
   value_json TEXT NOT NULL, computed_at INTEGER NOT NULL, algo_version TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS notifications(      -- 待投递事件（采集异常事件的出口）
+  id INTEGER PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL,
+  payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
+  state TEXT NOT NULL,           -- pending|delivered|dropped_expired|failed
+  delivered_at INTEGER, channel TEXT, attempts INTEGER NOT NULL DEFAULT 0);
 """
 
 
