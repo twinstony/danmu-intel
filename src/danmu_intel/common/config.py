@@ -60,7 +60,6 @@ class StatsConfig:
     # 终局判定门槛（需求 §6.4）
     end_burst_min_ms: int = 120_000
     end_burst_min_hits: int = 8
-    end_burst_window_ms: int = 60_000
     silence_ratio: float = 0.1
     silence_min_ms: int = 300_000
     min_signal_kinds: int = 3
