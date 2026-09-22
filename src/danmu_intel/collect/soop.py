@@ -157,24 +157,16 @@ def packet_header(packet: bytes) -> tuple[int, int]:
     return int(packet[SERVICE_SLICE]), int(packet[RETCODE_SLICE])
 
 
-def login_body(ticket: str = "", nickname: str = "", flag: int = GUEST_FLAG) -> bytes:
-    """登录包体（匿名游客）。"""
-    return SEP + ticket.encode() + SEP + nickname.encode() + SEP + str(flag).encode() + SEP
+def login_body() -> bytes:
+    """登录包体：匿名游客（ticket 与昵称都空，标志 = 游客）。"""
+    fields = ("", "", str(GUEST_FLAG))
+    return SEP + SEP.join(field.encode() for field in fields) + SEP
 
 
 def join_body(chat_no: int, *, log: str = "") -> bytes:
     """进频道包体：频道号 + 粉丝券 + 标记 + 扩展串 + 日志串（与官方播放器同构）。"""
-    return (
-        SEP
-        + str(chat_no).encode()
-        + SEP
-        + SEP
-        + b"0"
-        + SEP
-        + SEP
-        + log.encode()
-        + SEP
-    )
+    fields = (str(chat_no), "", "0", "", log)
+    return SEP + SEP.join(field.encode() for field in fields) + SEP
 
 
 def build_log_string(quality: str = "HD", geo_cc: str = "HK", geo_rc: str = "01") -> str:
