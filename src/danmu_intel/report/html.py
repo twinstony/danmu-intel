@@ -12,7 +12,15 @@ from html import escape
 
 from danmu_intel.common.sources import SourceRef
 from danmu_intel.report.facts import MatchFacts
-from danmu_intel.report.segments import KIND_LABELS, KIND_INTERPRETATION, KIND_FACT_INTERPRETATION, Segment
+from danmu_intel.report.segments import Segment
+
+# 段性质（需求 §6.6「内容性质」原文）→ 页面样式类
+NATURE_CLASSES = {
+    "事实": "fact",
+    "事实 + 解读": "fact-interpretation",
+    "解读": "interpretation",
+    "事实（风险提示）": "fact-gray",
+}
 
 CSS = """
 :root { color-scheme: light dark; }
@@ -85,9 +93,14 @@ def _render_body(body: str) -> str:
     return "\n".join(f"<p>{part}</p>" for part in paragraphs if part)
 
 
+def nature_class(nature: str) -> str:
+    """段性质 → CSS 类名（样式表按性质区分事实段与解读段）。"""
+    return NATURE_CLASSES.get(nature, "fact")
+
+
 def _segment_html(segment: Segment) -> str:
-    kind_class = segment.kind.replace("+", "-").replace("(", "-").replace(")", "")
-    label = KIND_LABELS.get(segment.kind, segment.kind)
+    kind_class = nature_class(segment.nature)
+    label = segment.nature
     return (
         f'<section class="seg seg--{escape(kind_class)}" id="seg-{segment.no}">'
         f'<h2><span>{segment.no}</span> {escape(segment.title)} '
@@ -114,9 +127,7 @@ def render_html(facts: MatchFacts) -> str:
         f"{match.league}｜{match.title}｜状态 {match.state}｜"
         f"弹幕 {len(facts.all_lines)} 条｜算法版本 {facts.algo_version}"
     )
-    interpretation = [
-        segment for segment in segments if segment.kind in (KIND_INTERPRETATION, KIND_FACT_INTERPRETATION)
-    ]
+    interpretation = [segment for segment in segments if segment.has_interpretation]
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>

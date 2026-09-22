@@ -18,8 +18,6 @@ from danmu_intel.report.rule_render import (
 from danmu_intel.report.segments import (
     INTERPRETATION_SEGMENTS,
     KIND_FACT,
-    KIND_FACT_GRAY,
-    KIND_FACT_INTERPRETATION,
     KIND_INTERPRETATION,
     SEGMENTS,
     MissingSegmentError,
@@ -63,14 +61,20 @@ def test_segments_match_requirements_verbatim():
 
 
 def test_segment_kinds_match_requirements():
-    kinds = {no: kind for no, _, kind in parse_requirements_section_66()}
-    assert kinds[0] == "事实" and kinds[3] == "解读" and kinds[5] == "事实（风险提示）"
-    assert kinds[2] == "事实 + 解读"
-    spec_kinds = {spec.no: spec.kind for spec in SEGMENTS}
-    assert spec_kinds[0] == KIND_FACT
-    assert spec_kinds[2] == KIND_FACT_INTERPRETATION
-    assert spec_kinds[3] == KIND_INTERPRETATION
-    assert spec_kinds[5] == KIND_FACT_GRAY
+    """段性质（需求 §6.6「内容性质」列）逐字一致；标记只有 fact / interpretation。"""
+    expected = {no: nature for no, _, nature in parse_requirements_section_66()}
+    assert {spec.no: spec.nature for spec in SEGMENTS} == expected
+    assert expected[2] == "事实 + 解读" and expected[5] == "事实（风险提示）"
+    for spec in SEGMENTS:
+        assert set(spec.kinds) <= {KIND_FACT, KIND_INTERPRETATION}
+    kinds = {spec.no: spec.kinds for spec in SEGMENTS}
+    assert kinds[0] == (KIND_FACT,)
+    assert kinds[3] == (KIND_INTERPRETATION,)
+    # 「事实 + 解读」的段两种标记并存
+    assert kinds[2] == (KIND_FACT, KIND_INTERPRETATION)
+    assert kinds[7] == (KIND_FACT, KIND_INTERPRETATION)
+    # 「事实（风险提示）」是事实标记 + 限定说明
+    assert kinds[5] == (KIND_FACT,) and SEGMENTS[5].note == "风险提示"
     assert INTERPRETATION_SEGMENTS == (2, 3, 4, 6, 7, 8, 9)
 
 
@@ -118,7 +122,7 @@ def test_report_marks_interpretation_segments(ledger):
     facts = collect_facts(ledger.conn, ledger.match_id, data_root=ledger.data_root)
     segments = build_report(facts)
     for segment in segments:
-        if segment.kind in (KIND_INTERPRETATION, KIND_FACT_INTERPRETATION):
+        if segment.has_interpretation:
             assert INTERPRETATION_MARK in segment.body, f"第 {segment.no} 段必须显式标注为解读"
     # 纯解读段不得缺失，也不得以纯数据替代
     for no in (3, 4, 6, 8, 9):
