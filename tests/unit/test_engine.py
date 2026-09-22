@@ -277,3 +277,30 @@ def test_algo_version_is_per_match(conn):
     assert algo_version(conn, 1) == f"{ALGO_VERSION}+ov1"
     assert algo_version(conn, 11) == f"{ALGO_VERSION}+ov1"
     assert algo_version(conn, 2) == ALGO_VERSION
+
+
+def test_apply_manual_candidate_writes_trace_and_audit(conn):
+    """人工修正候选走引擎落库：字段留痕 + 审计 + 版本递增（FR-C2-5 全链路）。"""
+    add_manual_slice(conn, match_id=1, game_no=1, start_ms=G1[0], end_ms=G1[1])
+    resolution = resolve(
+        [
+            BoundaryCandidate("official", 1, *G1, note="官方赛程"),
+            BoundaryCandidate(
+                "manual",
+                1,
+                G1[0] + 5_000,
+                G1[1],
+                override_by="管理员",
+                override_reason="官方时间与录像对不上",
+                override_at=1_790_064_000_000,
+            ),
+        ]
+    )
+    applied = apply_boundaries(conn, 1, resolution)
+    assert len(applied) == 1
+    window = load_slices(conn, 1)[0]
+    assert window.boundary_source == "manual" and window.start_ms == G1[0] + 5_000
+    assert window.override_by == "管理员" and window.override_reason == "官方时间与录像对不上"
+    assert window.conflict_note and "人工修正覆盖证据来源" in window.conflict_note
+    assert algo_version(conn, 1) == f"{ALGO_VERSION}+ov1"
+    assert audit.count(conn, action=audit.SLICE_OVERRIDE) == 1

@@ -19,6 +19,7 @@ from danmu_intel.stats.final import (
     VERDICT_FINAL,
     VERDICT_LIVE,
     VERDICT_REVOKED,
+    Reversal,
     SignalFact,
     active_kinds,
     announcement_fact,
@@ -252,3 +253,16 @@ def test_signal_facts_are_json_serializable(kind):
 
     payload = fact(kind, BASE, BASE + 1, hits=1).as_dict()
     assert json.loads(json.dumps(payload))["kind"] == kind
+
+
+def test_reversal_and_traffic_drop_edge_cases():
+    reversal = Reversal(kind="official_revision", at_ms=BASE, detail="官方改判")
+    assert reversal.as_dict()["label"] == "官方改判"
+
+    events = lines([BASE, BASE + 1_000], text="零星")
+    assert traffic_drop_fact(events, observed_until_ms=BASE, config=CONFIG) is None
+
+
+def test_announcement_needs_a_timestamped_declaration():
+    """官方渠道说了结束但没有时刻 → 不算信号（没有时刻就没有事实）。"""
+    assert announcement_fact([], official_ended_at=None, config=CONFIG) is None
