@@ -127,13 +127,14 @@ def test_identity_loads_existing_salt(tmp_path):
     assert identity.load_salt(target) == b"a" * 32  # 走缓存
 
 
-def test_db_creates_six_tables(data_root):
+def test_db_creates_all_tables(data_root):
     conn = open_db(paths.db_path())
     try:
         assert table_names(conn) == [
             "danmu_segments",
             "matches",
             "metrics",
+            "notifications",
             "room_sessions",
             "rooms",
             "slices",
