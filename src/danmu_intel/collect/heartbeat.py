@@ -19,9 +19,12 @@ import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping
+from typing import TYPE_CHECKING, Mapping
 
 from danmu_intel.common import paths
+
+if TYPE_CHECKING:  # 避免 collect 包内循环导入
+    from danmu_intel.collect.adapter import RoomKey
 
 HEARTBEAT_INTERVAL_S = 5.0  # 子进程写心跳的周期（issue #5 §2）
 HEARTBEAT_STALE_S = 15.0  # 主进程判僵死的阈值（设计 §7.4）
@@ -79,6 +82,11 @@ def read_heartbeat(platform: str, room_id: str, *, data_root: Path | None = None
         return Heartbeat(**payload)
     except (OSError, ValueError, TypeError):
         return None
+
+
+def read_room_heartbeat(room: "RoomKey", *, data_root: Path | None = None) -> Heartbeat | None:
+    """按房间读心跳（supervisor 的默认读法）。"""
+    return read_heartbeat(room.platform, room.room_id, data_root=data_root)
 
 
 def heartbeat_age_ms(beat: Heartbeat | None, now_ms: int, *, spawned_at_ms: int) -> int:

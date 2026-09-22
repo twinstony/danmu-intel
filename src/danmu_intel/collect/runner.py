@@ -22,7 +22,7 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterable
 
 from danmu_intel.collect import adapter as stream_layer
 from danmu_intel.collect.adapter import Adapter, Probe, RoomKey
@@ -133,6 +133,31 @@ def seal_segment(
     )
     conn.commit()
     return SealedSegment(rel_path, count, digest, first_ts, last_ts)
+
+
+def seal_pending_files(
+    conn: sqlite3.Connection,
+    session_id: int,
+    room: RoomKey,
+    *,
+    data_root: Path | None = None,
+    moments: Iterable[int],
+) -> list[SealedSegment]:
+    """把该房间「已落盘但还没进库」的文件封存（子进程被 kill 时的兜底）。
+
+    子进程被 SIGKILL 时来不及封存自己写的文件；若不补封，那一小时的消息就存在但
+    不在索引里，统计与贡献量都会漏。候选文件由传入的时刻算出（心跳里的最后一条
+    消息 + 当前时刻，跨小时轮转也盖得住），不存在的直接跳过。
+    """
+    root = data_root or paths.data_dir()
+    candidates: dict[Path, None] = {}
+    for moment in moments:
+        candidates[paths.raw_path(room.platform, room.room_id, moment)] = None
+    sealed: list[SealedSegment] = []
+    for path in candidates:
+        if path.exists() and path.stat().st_size:
+            sealed.append(seal_segment(conn, session_id, path, data_root=root))
+    return sealed
 
 
 async def _until_deadline(source: AsyncIterator[DanmuEvent], seconds: float | None) -> AsyncIterator[DanmuEvent]:
