@@ -24,7 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import AsyncIterator
 
-from danmu_intel.collect.adapter import Adapter, Probe, RoomKey, SILENCE_TIMEOUT_S
+from danmu_intel.collect import adapter as stream_layer
+from danmu_intel.collect.adapter import Adapter, Probe, RoomKey
 from danmu_intel.collect.heartbeat import (
     DISK_FREE_MIN_BYTES,
     HEARTBEAT_INTERVAL_S,
@@ -212,7 +213,8 @@ class SessionRuntime:
         self.stats.reconnects += 1
         self.stats.state = "stalled"
         if reason == "silence":
-            self._report(STALLED, "warning", {"silence_s": SILENCE_TIMEOUT_S})
+            # 报的是流层实际用的静默阈值（它读模块常量，测试里会被压小）
+            self._report(STALLED, "warning", {"silence_s": stream_layer.SILENCE_TIMEOUT_S})
         self.publish()
 
     # —— 周期性检查 ——

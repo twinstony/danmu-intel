@@ -35,7 +35,7 @@ CREATE TABLE IF NOT EXISTS room_sessions(      -- 一次采集会话（进程级
   pid INTEGER, started_at INTEGER NOT NULL, ended_at INTEGER,
   state TEXT NOT NULL,           -- connecting|running|stalled|no_stream|exited
   restart_count INTEGER NOT NULL DEFAULT 0,   -- 房间第几次重启（supervisor 给）
-  reconnects INTEGER NOT NULL DEFAULT 0,      -- 本会话累计重连次数
+  reconnects INTEGER NOT NULL DEFAULT 0,      -- 房间累计重连次数（跨重启接力）
   severity TEXT NOT NULL DEFAULT 'info',      -- info|warning|critical
   last_msg_at INTEGER);
 
