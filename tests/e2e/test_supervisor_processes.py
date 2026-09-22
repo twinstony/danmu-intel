@@ -32,7 +32,7 @@ from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
 from danmu_intel.common.matches import create_match
 
-from conftest import load_huya_fixture
+from conftest import load_fixture
 
 REPLAY_CHILD = Path(__file__).parent / "replay_child.py"
 FRAMES = Path(__file__).parent.parent / "fixtures" / "huya" / "frames.jsonl"
@@ -43,7 +43,7 @@ ROOM_IDS = ("660000", "323444", "11342412")
 
 @pytest.fixture
 def frame_count() -> int:
-    return len([record for record in load_huya_fixture() if record["kind"] == "danmaku"])
+    return len([record for record in load_fixture("huya") if record["kind"] == "danmaku"])
 
 
 def make_spawn(log_dir: Path):
