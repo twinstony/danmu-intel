@@ -73,6 +73,10 @@ class TarsWriter:
         else:
             self._buf += _head(tag, EN_STRING4) + struct.pack("!I", len(raw)) + raw
 
+    def write_struct(self, tag: int, body: bytes) -> None:
+        """结构体：BEGIN 头 + 已编码的字段 + END 头。"""
+        self._buf += _head(tag, EN_STRUCT_BEGIN) + body + _head(0, EN_STRUCT_END)
+
     def write_bytes(self, tag: int, value: bytes) -> None:
         self._buf += _head(tag, EN_BYTES)
         self._buf += _head(0, EN_INT8)  # bytes 的长度字段固定带 tag 0 / INT8 头

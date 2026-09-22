@@ -125,6 +125,24 @@ def register_payload(params: ConnectParams) -> bytes:
     return frame.getvalue()
 
 
+def build_danmaku_frame(uid: str, nick: str, text: str) -> bytes:
+    """按虎牙协议构造一帧弹幕 —— 协议自检与 fixture 生成用。"""
+    user = TarsWriter()
+    user.write_int(0, int(uid))
+    user.write_string(2, nick)
+    payload = TarsWriter()
+    payload.write_struct(0, user.getvalue())
+    payload.write_string(3, text)
+    broadcast = TarsWriter()
+    broadcast.write_int(0, 3)
+    broadcast.write_int(1, URI_DANMAKU)
+    broadcast.write_bytes(2, payload.getvalue())
+    frame = TarsWriter()
+    frame.write_int(0, MSG_TYPE_BROADCAST)
+    frame.write_bytes(1, broadcast.getvalue())
+    return frame.getvalue()
+
+
 def _first_match(pattern: str, page: str) -> str | None:
     match = re.search(pattern, page)
     return match.group(1) if match else None
