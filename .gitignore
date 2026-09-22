@@ -1,0 +1,21 @@
+# 凭据与本地数据（绝不进库）
+.env
+*.pem
+*.key
+*.keystore
+
+# 本地数据目录（原始弹幕/数据库/LLM 日志/归档）
+danmu-intel-data/
+
+# 构建产物与缓存
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+htmlcov/
+
+# OS / 编辑器
+.DS_Store
+*.swp
+.vscode/
+.idea/
