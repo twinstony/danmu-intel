@@ -159,10 +159,22 @@ def room_contribution(
     不同房间的同文弹幕各算一条（它们是两份独立证据）。
     """
     root = data_root or paths.data_dir()
-    rows = conn.execute(
+    # 房间清单来自「采集会话」而不是落盘文件：重启过几个进程也是贡献量的一部分
+    # （`danmu_segments.rel_path` 唯一，同一个文件被两个会话先后落盘只会指向后者）
+    room_rows = conn.execute(
         """
-        SELECT r.platform AS platform, r.room_id AS room_id,
-               seg.rel_path AS rel_path, s.id AS session_id
+        SELECT r.platform AS platform, r.room_id AS room_key, COUNT(s.id) AS session_count
+        FROM room_sessions s
+        JOIN rooms r ON r.id = s.room_id
+        WHERE s.match_id = ?
+        GROUP BY r.platform, r.room_id
+        ORDER BY r.platform, r.room_id
+        """,
+        (match_id,),
+    ).fetchall()
+    segment_rows = conn.execute(
+        """
+        SELECT r.platform AS platform, r.room_id AS room_key, seg.rel_path AS rel_path
         FROM danmu_segments seg
         JOIN room_sessions s ON s.id = seg.room_session_id
         JOIN rooms r ON r.id = s.room_id
@@ -172,22 +184,17 @@ def room_contribution(
         (match_id,),
     ).fetchall()
 
-    order: list[tuple[str, str]] = []
     events: dict[tuple[str, str], list] = {}
-    sessions: dict[tuple[str, str], set[int]] = {}
-    for row in rows:
-        key = (row["platform"], row["room_id"])
-        if key not in events:
-            order.append(key)
-            events[key] = []
-            sessions[key] = set()
-        sessions[key].add(int(row["session_id"]))
+    for row in segment_rows:
+        key = (row["platform"], row["room_key"])
+        bucket = events.setdefault(key, [])
         for _, event in iter_events(root / row["rel_path"]):
-            events[key].append(event)
+            bucket.append(event)
 
     contributions: list[RoomContribution] = []
-    for key in order:
-        collected = events[key]
+    for row in room_rows:
+        key = (row["platform"], row["room_key"])
+        collected = events.get(key, [])
         kept = dedupe(collected)
         timestamps = [event.ts for event in collected]
         contributions.append(
@@ -199,7 +206,7 @@ def room_contribution(
                 duplicate_count=len(collected) - len(kept),
                 first_ts=min(timestamps) if timestamps else None,
                 last_ts=max(timestamps) if timestamps else None,
-                session_count=len(sessions[key]),
+                session_count=int(row["session_count"]),
             )
         )
     return contributions

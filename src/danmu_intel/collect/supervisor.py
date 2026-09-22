@@ -202,9 +202,23 @@ class Supervisor:
                     break
                 if all(run.stopped for run in self.runs):
                     break
-                self.sleep(self.poll_interval)
+                self.sleep(self.next_wait_s())
         finally:
             self.shutdown()
+
+    def next_wait_s(self, now: int | None = None) -> float:
+        """下一次轮询前等多久：不晚于最近一个待拉起房间的退避到点时刻。
+
+        固定睡满 5 秒会把「退避 1 秒」拖成 5 秒以上，`kill` 后 10 秒内拉起就没保证了。
+        """
+        moment = self.clock() if now is None else now
+        wait_ms = int(self.poll_interval * 1000)
+        pending = [
+            run.next_attempt_at - moment for run in self.runs if run.process is None and not run.stopped
+        ]
+        if pending:
+            wait_ms = max(0, min(wait_ms, min(pending)))
+        return wait_ms / 1000
 
     def shutdown(self) -> None:
         """收工：把还活着的子进程停掉，并把它们的会话行补上结束时间。"""

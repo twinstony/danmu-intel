@@ -232,6 +232,18 @@ def test_killed_child_is_restarted_within_ten_seconds(conn, data_root):
     assert json.loads(harness.environments[-1][SUPERVISION_ENV]) == {"restart_count": 1, "reconnects": 0}
 
 
+def test_wait_shortens_to_the_next_restart_deadline(conn, data_root):
+    """退避到点就拉，不许被 5 秒轮询粒度拖后（关系「kill 后 10 秒内拉起」）。"""
+    harness = Harness(conn, data_root=data_root)
+    harness.tick()
+    assert harness.supervisor.next_wait_s(harness.now) == supervisor_module.POLL_INTERVAL_S
+    harness.seed_session()
+    harness.died(returncode=-9)
+    assert harness.supervisor.next_wait_s(harness.now) == 1.0
+    harness.advance(1)
+    assert harness.supervisor.next_wait_s(harness.now) == 0.0
+
+
 def test_backoff_ladder_grows_to_sixty_seconds(conn, data_root):
     harness = Harness(conn, data_root=data_root)
     harness.tick()
