@@ -222,3 +222,22 @@ def test_session_still_seals_evidence_when_stream_raises(data_root):
         assert conn.execute("SELECT msg_count FROM danmu_segments").fetchone()["msg_count"] == 2
     finally:
         conn.close()
+
+
+def test_seal_pending_files_uses_the_given_data_root(tmp_path, data_root):
+    """子进程被 kill 时由主进程补封：文件路径按显式数据目录算，不读环境变量。"""
+    from danmu_intel.collect.runner import seal_pending_files
+
+    elsewhere = tmp_path / "elsewhere"
+    moment = BASE_TS + 1_000
+    path = paths.raw_path("huya", "660000", moment, data_root=elsewhere)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(make_event(moment).to_line() + "\n", encoding="utf-8")
+
+    with session_db() as conn:
+        assert seal_pending_files(
+            conn, 12, ROOM, data_root=elsewhere, moments=[moment, moment + 3_600_000]
+        )
+        row = conn.execute("SELECT * FROM danmu_segments").fetchone()
+    assert row["rel_path"].endswith("660000-16.jsonl")
+    assert row["msg_count"] == 1 and row["room_session_id"] == 12

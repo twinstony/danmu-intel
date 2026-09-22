@@ -52,6 +52,13 @@ def test_raw_path_layout(data_root):
     assert path.parent.parent == paths.raw_dir("huya")
 
 
+def test_raw_path_accepts_explicit_data_root(tmp_path):
+    """显式数据目录（supervisor 给子进程补封文件时用）优先于环境变量。"""
+    path = paths.raw_path("huya", "660000", BASE_TS, tz=CST, data_root=tmp_path / "elsewhere")
+    assert path == tmp_path / "elsewhere" / "raw" / "huya" / "2026-09-22" / "660000-16.jsonl"
+    assert paths.raw_dir("huya", data_root=tmp_path / "elsewhere") == tmp_path / "elsewhere" / "raw" / "huya"
+
+
 def test_site_dir_and_match_page(site_root):
     assert paths.site_dir() == site_root
     assert paths.match_page_path(7) == site_root / "matches" / "7.html"

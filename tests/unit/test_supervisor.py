@@ -359,7 +359,7 @@ def test_dead_child_files_are_sealed_by_supervisor(conn, data_root):
     harness = Harness(conn, data_root=data_root)
     harness.tick()
     last_msg_at = BASE_TS + 1_000
-    path = paths.raw_path("huya", "660000", last_msg_at)
+    path = paths.raw_path("huya", "660000", last_msg_at, data_root=data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(make_event(last_msg_at).to_line() + "\n", encoding="utf-8")
 

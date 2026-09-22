@@ -33,17 +33,20 @@ def salt_path() -> Path:
     return data_dir() / "salt"
 
 
-def raw_dir(platform: str) -> Path:
-    return data_dir() / "raw" / platform
+def raw_dir(platform: str, *, data_root: Path | None = None) -> Path:
+    return (data_root or data_dir()) / "raw" / platform
 
 
-def raw_path(platform: str, room_id: str, ts_ms: int, *, tz: tzinfo | None = None) -> Path:
+def raw_path(
+    platform: str, room_id: str, ts_ms: int, *, tz: tzinfo | None = None, data_root: Path | None = None
+) -> Path:
     """`<data>/raw/<platform>/<yyyy-mm-dd>/<room_id>-<hh>.jsonl`（设计 §5.2）。
 
-    时间用采集机的本地时区（ADR-0001 单机部署）；`tz` 仅供测试注入。
+    时间用采集机的本地时区（ADR-0001 单机部署）；`tz` 与 `data_root` 供测试注入。
     """
     moment = datetime.fromtimestamp(ts_ms / 1000, tz=tz)
-    return raw_dir(platform) / moment.strftime("%Y-%m-%d") / f"{room_id}-{moment.strftime('%H')}.jsonl"
+    directory = raw_dir(platform, data_root=data_root) / moment.strftime("%Y-%m-%d")
+    return directory / f"{room_id}-{moment.strftime('%H')}.jsonl"
 
 
 def site_dir() -> Path:

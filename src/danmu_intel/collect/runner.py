@@ -152,7 +152,7 @@ def seal_pending_files(
     root = data_root or paths.data_dir()
     candidates: dict[Path, None] = {}
     for moment in moments:
-        candidates[paths.raw_path(room.platform, room.room_id, moment)] = None
+        candidates[paths.raw_path(room.platform, room.room_id, moment, data_root=root)] = None
     sealed: list[SealedSegment] = []
     for path in candidates:
         if path.exists() and path.stat().st_size:
