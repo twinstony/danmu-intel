@@ -30,6 +30,7 @@ from danmu_intel.collect.heartbeat import (
     HEARTBEAT_STALE_S,
     Heartbeat,
     Supervision,
+    heartbeat_age_ms,
     read_heartbeat,
     supervision_env,
 )
@@ -49,7 +50,7 @@ POLL_INTERVAL_S = 5.0  # 主进程轮询周期（issue #5 §1）
 RESTART_BACKOFF_S = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0)  # 设计 §7.4：1s → 60s 上限
 RESTART_LIMIT = 5  # 窗口内允许的重启次数，超过即停止重试
 RESTART_WINDOW_S = 1800.0  # 「30 分钟内」防雪崩窗口
-HEARTBEAT_STARTUP_GRACE_S = 30.0  # 首次心跳宽限（房间探测最多耗 HTTP 超时 15 秒）
+HEARTBEAT_STARTUP_GRACE_S = 30.0  # 首次心跳宽限（进程启动+建库+首条心跳的正常耗时不超 1 秒）
 KILL_GRACE_S = 5.0  # terminate 到 kill 的宽限
 CHILD_MODULE = "danmu_intel"
 
@@ -92,10 +93,6 @@ class RoomRun:
     @property
     def pid(self) -> int | None:
         return None if self.process is None else self.process.pid
-
-    @property
-    def running(self) -> bool:
-        return self.process is not None and self.process.poll() is None
 
 
 def child_invocation(
@@ -277,7 +274,7 @@ class Supervisor:
         if beat is not None:
             run.session_id = beat.session_id
             run.reconnects = max(run.reconnects, beat.reconnects)
-        age_ms = now - (beat.written_at if beat is not None else run.spawn_ms)
+        age_ms = heartbeat_age_ms(beat, now, spawned_at_ms=run.spawn_ms)
         limit_ms = int(
             (HEARTBEAT_STALE_S if beat is not None else HEARTBEAT_STARTUP_GRACE_S) * 1000
         )

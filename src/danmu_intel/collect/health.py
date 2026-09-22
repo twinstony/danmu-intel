@@ -16,6 +16,8 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from danmu_intel.collect.adapter import RoomKey
+from danmu_intel.collect.heartbeat import read_room_heartbeat
 from danmu_intel.collect.incidents import Incident, recent
 from danmu_intel.common import paths
 from danmu_intel.common.events import dedupe, iter_events
@@ -109,15 +111,11 @@ def room_health(
     now: int | None = None,
 ) -> list[RoomHealth]:
     """本场比赛每个直播间的最新健康状态（新→旧无关，按平台/房间排序）。"""
-    from danmu_intel.collect.heartbeat import read_room_heartbeat
-
     root = data_root or paths.data_dir()
     moment = now if now is not None else int(time.time() * 1000)
     health: list[RoomHealth] = []
     for row in _latest_sessions(conn, match_id):
         session_id = int(row["session_id"])
-        from danmu_intel.collect.adapter import RoomKey
-
         room = RoomKey(platform=row["platform"], room_id=row["room_key"], url=row["url"])
         beat = read_room_heartbeat(room, data_root=root)
         live = (
