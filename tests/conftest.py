@@ -28,19 +28,26 @@ REL_PATH = "raw/huya/2026-09-22/660000-16.jsonl"
 ROOM_ID = "660000"
 
 
+@pytest.fixture(autouse=True)
+def isolated_dirs(tmp_path, monkeypatch) -> None:
+    """任何测试都不得写到真实的 `~/danmu-intel-data` 或仓库 site/ 目录。
+
+    autouse：漏写 data_root 的测试也不会污染真实数据目录（曾经漏过一次）。
+    """
+    monkeypatch.setenv(paths.DATA_DIR_ENV, str(tmp_path / "danmu-intel-data"))
+    monkeypatch.setenv(paths.SITE_DIR_ENV, str(tmp_path / "site"))
+
+
 @pytest.fixture
-def data_root(tmp_path, monkeypatch) -> Path:
+def data_root(isolated_dirs, tmp_path) -> Path:
     root = tmp_path / "danmu-intel-data"
-    monkeypatch.setenv(paths.DATA_DIR_ENV, str(root))
-    root.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
     return root
 
 
 @pytest.fixture
-def site_root(tmp_path, monkeypatch) -> Path:
-    site = tmp_path / "site"
-    monkeypatch.setenv(paths.SITE_DIR_ENV, str(site))
-    return site
+def site_root(isolated_dirs, tmp_path) -> Path:
+    return tmp_path / "site"
 
 
 @pytest.fixture

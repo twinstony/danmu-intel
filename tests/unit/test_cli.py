@@ -69,8 +69,9 @@ def test_cli_reports_errors(conn, capsys):
     assert "切片起止非法" in capsys.readouterr().err
 
 
-def test_cli_verbose_sets_logging(capsys):
+def test_cli_verbose_sets_logging(conn, capsys):
     assert main(["--verbose", "match", "add", "--league", "LEC", "--team-a", "G2", "--team-b", "FNC"]) == 0
+    assert "已登记比赛" in capsys.readouterr().out
 
 
 def test_collect_command_with_replay_adapter(data_root, monkeypatch, capsys):
