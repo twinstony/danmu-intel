@@ -173,17 +173,18 @@ class Supervisor:
         data_root: Path | None = None,
         clock: Callable[[], int] = now_ms,
         sleep: Callable[[float], None] = time.sleep,
-        spawn: Spawner = popen,
+        spawn: Spawner | None = None,
         read_beat: BeatReader | None = None,
-        poll_interval: float = POLL_INTERVAL_S,
+        poll_interval: float | None = None,
     ) -> None:
         self.conn = conn
         self.match_id = match_id
         self.data_root = data_root or paths.data_dir()
         self.clock = clock
         self.sleep = sleep
-        self.spawn = spawn
-        self.poll_interval = poll_interval
+        # 缺省值在调用时取模块常量/函数，测试才能 monkeypatch 掉真进程与真等待
+        self.spawn = spawn or popen
+        self.poll_interval = POLL_INTERVAL_S if poll_interval is None else poll_interval
         self._read_beat = read_beat or (
             lambda room: read_heartbeat(room.platform, room.room_id, data_root=self.data_root)
         )

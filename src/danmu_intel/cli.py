@@ -1,6 +1,10 @@
 """命令行入口：一条条命令跑通整条链路。
 
     danmu-intel collect --url https://www.huya.com/660000 --seconds 300 --match-id 1
+    danmu-intel supervise --match-id 1 --room … --room … --room …   # 多房间并发 + 监督
+    danmu-intel health --match-id 1            # 每房间健康状态（心跳/重连/重启/严重级别）
+    danmu-intel contribution --match-id 1      # 每房间贡献量（条数/跨度/去重后条数）
+    danmu-intel events --match-id 1            # 采集异常事件（待 T11 投递）
     danmu-intel match add --league LPL --team-a iG --team-b LNG --state ended
     danmu-intel slice --match-id 1 --game-no 1 --start-ms … --end-ms …
     danmu-intel stats --match-id 1
@@ -16,6 +20,7 @@ import asyncio
 import json
 import logging
 import sys
+from datetime import datetime
 
 from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
@@ -30,6 +35,14 @@ from danmu_intel.pipeline import (
 from danmu_intel.slice.manual import add_manual_slice
 
 logger = logging.getLogger("danmu_intel")
+
+
+def _stamp(ms: int | None) -> str:
+    return "-" if ms is None else datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _ago(ms: int | None, now: int) -> str:
+    return "-" if ms is None else f"{(now - ms) / 1000:.0f} 秒前"
 
 
 def _cmd_collect(args: argparse.Namespace) -> int:
@@ -55,9 +68,125 @@ def _cmd_collect(args: argparse.Namespace) -> int:
     probe = result.probe
     if probe:
         print(f"房间：{room.platform}/{room.room_id}｜{probe.streamer or '未知主播'}｜开播={probe.is_live}")
-    print(f"采集会话 #{result.session_id}：共 {result.msg_count} 条弹幕")
+    print(f"采集会话 #{result.session_id}：共 {result.msg_count} 条弹幕（状态 {result.state}，累计重连 {result.reconnects} 次）")
+    for kind in result.incidents:
+        print(f"  异常：{kind}")
     for segment in result.segments:
         print(f"  落盘：{paths.data_dir() / segment.rel_path}｜{segment.msg_count} 条｜SHA256 {segment.sha256}")
+    return 0
+
+
+def _cmd_supervise(args: argparse.Namespace) -> int:
+    """多房间并发采集：一房间一子进程，退出/僵死自动拉起，超限停下来报事。"""
+    from danmu_intel.collect import get_adapter
+    from danmu_intel.collect.supervisor import Supervisor
+
+    adapter = get_adapter(args.platform)
+    rooms = [adapter.parse_room(url) for url in args.room]
+    seen: set[tuple[str, str]] = set()
+    for room in rooms:
+        key = (room.platform, room.room_id)
+        if key in seen:
+            raise ValueError(f"重复的直播间：{room.platform}/{room.room_id}（--room 不能重复）")
+        seen.add(key)
+
+    conn = open_db()
+    try:
+        get_match(conn, args.match_id)
+        supervisor = Supervisor(conn, rooms, match_id=args.match_id, data_root=paths.data_dir())
+        print(f"开始监督 {len(rooms)} 个直播间（比赛 #{args.match_id}）：" + "、".join(f"{r.platform}/{r.room_id}" for r in rooms))
+        try:
+            supervisor.run(seconds=args.seconds)
+        except KeyboardInterrupt:
+            print("收到中断，已停止子进程", file=sys.stderr)
+        for run in supervisor.runs:
+            line = (
+                f"房间 {run.room.platform}/{run.room.room_id}：{run.state}｜"
+                f"重启 {run.restarts} 次｜重连 {run.reconnects} 次"
+            )
+            print(line + (f"｜停止原因：{run.reason}" if run.reason else ""))
+        if supervisor.stopped_rooms():
+            return 1
+    finally:
+        conn.close()
+    return 0
+
+
+def _cmd_health(args: argparse.Namespace) -> int:
+    from danmu_intel.collect.health import room_health
+
+    now = int(datetime.now().timestamp() * 1000)
+    conn = open_db()
+    try:
+        rows = room_health(conn, args.match_id, data_root=paths.data_dir(), now=now)
+    finally:
+        conn.close()
+    if not rows:
+        print(f"比赛 #{args.match_id} 还没有采集会话")
+        return 0
+    for item in rows:
+        print(
+            f"{item.platform}/{item.room_id}（{item.streamer or '未知主播'}，开播={item.is_live}）"
+            f"｜状态 {item.state}｜严重级别 {item.severity}"
+        )
+        print(
+            f"  pid {item.pid}｜会话 #{item.session_id}｜重启 {item.restart_count} 次｜"
+            f"重连 {item.reconnects} 次｜已收 {item.msg_count} 条"
+        )
+        print(
+            f"  起于 {_stamp(item.started_at)}｜止于 {_stamp(item.ended_at)}｜"
+            f"最后一条消息 {_stamp(item.last_msg_at)}（{_ago(item.last_msg_at, now)}）"
+        )
+        if item.last_incident is not None:
+            print(
+                f"  最近异常：{item.last_incident.kind}（{item.last_incident.severity}）"
+                f"@ {_stamp(item.last_incident.created_at)}"
+            )
+    return 0
+
+
+def _cmd_contribution(args: argparse.Namespace) -> int:
+    from danmu_intel.collect.health import room_contribution
+
+    conn = open_db()
+    try:
+        rows = room_contribution(conn, args.match_id, data_root=paths.data_dir())
+    finally:
+        conn.close()
+    if not rows:
+        print(f"比赛 #{args.match_id} 还没有落盘记录")
+        return 0
+    for item in rows:
+        span = "-" if item.first_ts is None or item.last_ts is None else f"{(item.last_ts - item.first_ts) / 1000:.0f} 秒"
+        print(
+            f"{item.platform}/{item.room_id}：{item.msg_count} 条｜去重后 {item.deduped_count} 条"
+            f"（重复 {item.duplicate_count} 条）｜时间跨度 {span}"
+            f"（{_stamp(item.first_ts)} → {_stamp(item.last_ts)}）｜{item.session_count} 个采集会话"
+        )
+    print(
+        f"合计：{sum(item.msg_count for item in rows)} 条｜去重后 {sum(item.deduped_count for item in rows)} 条"
+        f"（{len(rows)} 个直播间）"
+    )
+    return 0
+
+
+def _cmd_events(args: argparse.Namespace) -> int:
+    from danmu_intel.collect.incidents import recent
+
+    conn = open_db()
+    try:
+        incidents = recent(conn, match_id=args.match_id, limit=args.limit)
+    finally:
+        conn.close()
+    if not incidents:
+        print("没有采集异常事件")
+        return 0
+    for item in incidents:
+        room = f"{item.payload.get('platform')}/{item.payload.get('room_id')}"
+        detail = {key: value for key, value in item.payload.items() if key not in {"platform", "room_id", "match_id"}}
+        print(
+            f"#{item.id} {_stamp(item.created_at)}｜{item.kind}（{item.severity}，{item.state}）｜{room}｜{json.dumps(detail, ensure_ascii=False)}"
+        )
     return 0
 
 
@@ -155,7 +284,7 @@ def _cmd_verify_sources(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（T1：采集→静态页最薄闭环）")
+    parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→静态页）")
     parser.add_argument("--verbose", action="store_true", help="打印重连等运行日志")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -165,6 +294,26 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--seconds", type=float, default=None, help="采集时长（秒），缺省则持续采集")
     collect.add_argument("--match-id", type=int, required=True, help="关联的比赛 id（先 match add）")
     collect.set_defaults(func=_cmd_collect)
+
+    supervise = sub.add_parser("supervise", help="多房间并发采集与监督（一房间一子进程）")
+    supervise.add_argument("--room", action="append", required=True, metavar="URL", help="直播间链接，可重复")
+    supervise.add_argument("--platform", default="huya", help="平台标识（默认 huya）")
+    supervise.add_argument("--match-id", type=int, required=True)
+    supervise.add_argument("--seconds", type=float, default=None, help="监督时长（秒），缺省则跑到所有房间停下")
+    supervise.set_defaults(func=_cmd_supervise)
+
+    health = sub.add_parser("health", help="采集健康状态（每房间：心跳/状态/重连/重启/严重级别）")
+    health.add_argument("--match-id", type=int, required=True)
+    health.set_defaults(func=_cmd_health)
+
+    contribution = sub.add_parser("contribution", help="每房间贡献量（条数/时间跨度/去重后条数）")
+    contribution.add_argument("--match-id", type=int, required=True)
+    contribution.set_defaults(func=_cmd_contribution)
+
+    events = sub.add_parser("events", help="采集异常事件（待投递）")
+    events.add_argument("--match-id", type=int, default=None)
+    events.add_argument("--limit", type=int, default=20)
+    events.set_defaults(func=_cmd_events)
 
     match = sub.add_parser("match", help="比赛实体")
     match_sub = match.add_subparsers(dest="match_command", required=True)

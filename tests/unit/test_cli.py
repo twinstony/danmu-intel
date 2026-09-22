@@ -120,3 +120,91 @@ def test_collect_command_requires_registered_match(data_root, capsys):
 def test_collect_command_requires_match_id(capsys):
     with pytest.raises(SystemExit):
         main(["collect", "--url", "https://www.huya.com/1", "--seconds", "1"])
+
+
+# —— T2：多房间监督与可见性 ——
+
+
+def test_supervise_rejects_duplicate_rooms(data_root, capsys, monkeypatch):
+    monkeypatch.setattr("danmu_intel.collect.supervisor.POLL_INTERVAL_S", 0.01)
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    assert main(["supervise", "--match-id", "1", "--room", "https://www.huya.com/660000",
+                 "--room", "https://www.huya.com/660000"]) == 2
+    assert "重复的直播间" in capsys.readouterr().err
+
+
+def test_supervise_rejects_unknown_match(data_root, capsys):
+    assert main(["supervise", "--match-id", "7", "--room", "https://www.huya.com/660000"]) == 2
+    assert "未找到比赛 #7" in capsys.readouterr().err
+
+
+def test_supervise_runs_three_rooms_and_reports(data_root, capsys, monkeypatch):
+    """三个房间并发监督：一房间一子进程，收工后逐个汇报（真子进程替换为假进程）。"""
+    from tests.unit.test_supervisor import FakeProcess
+
+    monkeypatch.setattr("danmu_intel.collect.supervisor.POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr("danmu_intel.collect.supervisor.popen", lambda command, env: FakeProcess(pid=4242 + len(command)))
+
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    code = main([
+        "supervise", "--match-id", "1", "--seconds", "0.05",
+        "--room", "https://www.huya.com/660000",
+        "--room", "https://www.huya.com/323444",
+        "--room", "https://www.huya.com/11342412",
+    ])
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "开始监督 3 个直播间" in out
+    assert out.count("重启 0 次") == 3
+    assert out.count("重连 0 次") == 3
+
+
+def test_health_prints_live_and_dead_rooms(ledger, capsys):
+    assert main(["health", "--match-id", str(ledger.match_id)]) == 0
+    out = capsys.readouterr().out
+    assert "huya/660000" in out
+    assert "状态 exited" in out
+    assert "重启 0 次" in out and "已收 65 条" in out
+
+
+def test_health_without_sessions(data_root, capsys):
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    assert main(["health", "--match-id", "1"]) == 0
+    assert "还没有采集会话" in capsys.readouterr().out
+
+
+def test_contribution_prints_per_room(ledger, capsys):
+    assert main(["contribution", "--match-id", str(ledger.match_id)]) == 0
+    out = capsys.readouterr().out
+    assert "huya/660000：65 条｜去重后 65 条（重复 0 条）" in out
+    assert "时间跨度 354 秒" in out
+    assert "合计：65 条｜去重后 65 条（1 个直播间）" in out
+
+
+def test_contribution_without_records(data_root, capsys):
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    assert main(["contribution", "--match-id", "1"]) == 0
+    assert "还没有落盘记录" in capsys.readouterr().out
+
+
+def test_events_prints_incidents(data_root, conn, capsys):
+    from danmu_intel.collect.incidents import DISK_LOW, emit
+
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    emit(conn, DISK_LOW, severity="critical", platform="huya", room_id="660000", match_id=1,
+         detail={"free_bytes": 1024})
+    capsys.readouterr()
+
+    assert main(["events", "--match-id", "1"]) == 0
+    out = capsys.readouterr().out
+    assert "disk_low（critical，pending）" in out
+    assert "huya/660000" in out and '"free_bytes": 1024' in out
+
+
+def test_events_reports_empty(data_root, capsys):
+    assert main(["events"]) == 0
+    assert "没有采集异常事件" in capsys.readouterr().out
