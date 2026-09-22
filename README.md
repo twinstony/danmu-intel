@@ -6,16 +6,21 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2）
+## 当前能力（T1+T2+T5）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
-规则直出**十一段**静态页。
+规则直出**十一段**报告页。
 
 **T2**：同场比赛**多直播间并发采集**（一房间一子进程）+ 采集监督：心跳 5 秒、无消息
 60 秒重连、无首条消息 120 秒 `no_stream`、进程被杀/僵死自动拉起（退避 1s→60s，
 30 分钟内重启超 5 次停止重试并留因）、磁盘可用 < 5GB 报警、每房间贡献量可查。
 
-不含 LLM、付费墙、公网发布、多平台、后台（见设计 §19 实施分层）。
+**T5**：报告**三形态**（赛中快报 ≤2 分钟 / 完整版 ≤10 分钟 / 复盘版 ≤15 分钟）+
+**事实·解读分层**（解读段明确标注、解读层输入只有事实层，`fact_layer_hash` 留指纹）+
+**SHA256 溯源**（每项事实带文件 + 行范围 + 封存哈希）；同一形态换版即新增版本，
+缺解读段或来源对不上时**拒绝发布**。
+
+不含真 LLM、付费墙、公网发布、多平台、后台（见设计 §19 实施分层）。
 
 ## 安装
 
@@ -43,15 +48,36 @@ danmu-intel supervise --match-id 1 --seconds 1800 \
 # ③ 人工指定这一局的起止（毫秒时间戳，可从落盘记录里取）
 danmu-intel slice --match-id 1 --game-no 1 --start-ms 1790064000123 --end-ms 1790064300123
 
-# ④ 规则统计 → ⑤ 十一段静态页
-danmu-intel stats  --match-id 1
-danmu-intel render --match-id 1          # → site/matches/1.html
+# ④ 规则统计
+danmu-intel stats --match-id 1
+
+# ⑤ 三形态报告（发布即上线；缺解读段 / 来源对不上会被拒绝）
+danmu-intel report --match-id 1 --kind live_brief --completed-game 1 --trigger-game 1
+danmu-intel report --match-id 1 --kind full      # → site/matches/1/full.html
+danmu-intel report --match-id 1 --kind review    # → site/matches/1/review.html
+danmu-intel reports --match-id 1                 # 已发布的形态 × 版本（含事实层哈希）
 
 # ⑥ 自检
-danmu-intel verify-sources --match-id 1  # 逐项复核来源（文件 + 行范围 + SHA256）
+danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核来源（文件 + 行范围 + SHA256）
 danmu-intel rebuild        --match-id 1  # AC-13：删统计后重算，结果必须逐字节相同
 python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资产凭据
 ```
+
+### 报告三形态怎么看（T5）
+
+- **段集固定**：同一形态每次发布的段号集合一致（结构稳定）。赛中快报是完整十一段的
+  真子集（去掉需要终局对照的「预测验证」），完整版与复盘版都是全十一段。
+- **完成节点才进正文**：`--completed-game N` 声明已完成的小局（可重复）；进行中的节点
+  既不出现在统计里，也不出现在取材范围的条数里，只在「未纳入本报告的节点」这句里出现。
+- **事实与解读分层**：段性质只有「事实」与「解读」两种标记（「事实 + 解读」两者并存），
+  解读段一律带「（解读，非事实）」标注；解读层只拿事实层当输入，其指纹记在
+  `reports.fact_layer_hash` 与页面上。
+- **发布钩子**：段集齐备、**解读段齐备**（AC-16）、来源文件与采集时封存的 SHA256 一致，
+  任一项不通过即拒绝发布（`reports` 留一行 `state='failed'`，页面不落盘）。
+- **时限**：2 / 10 / 15 分钟是形态常量；实测耗时记进 `reports.timing_json`，
+  超时**不阻断**发布（NFR-T：准确性优先），但会显示在 `report` 的输出里。
+- 解读层调用点是注入缝（`Interpreter` 协议）；本票只有规则直出兜底，
+  `llm_state='rule_fallback'` 如实标注，真 LLM 属 T6。
 
 ### 采集状态怎么看（T2）
 
@@ -79,13 +105,14 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 | SQLite | `~/danmu-intel-data/db.sqlite3`（WAL） | 否 |
 | 心跳文件 | `~/danmu-intel-data/runtime/heartbeat/<platform>-<room_id>.json` | 否 |
 | 用户哈希盐值 | `~/danmu-intel-data/salt`（0600） | 否 |
-| 站点产物 | `site/matches/<match_id>.html` | 是 |
+| 站点产物 | `site/matches/<match_id>/<kind>.html`（每场每形态一份） | 是 |
 
 `DANMU_INTEL_DATA` / `DANMU_INTEL_SITE` 可覆盖上面两个位置（测试用它指向临时目录）。
 
-`site/matches/1.html` 是 2026-09-22 在本机对虎牙 660000 / 323444 两个直播间做了
-5 分钟真实采集后生成的样例产物；它引用的原始记录在采集机的数据目录里，
-换一台机器跑 `danmu-intel render` 会用当地数据重新生成。
+T1 曾提交过一份样例产物 `site/matches/1.html`；T5 把页面路径改成
+`site/matches/<match_id>/<kind>.html`（每场每形态一份），旧的单文件路径已删除
+（AGENTS.md：不留兼容层）。换一台机器跑 `danmu-intel report --kind full` 会用当地数据
+重新生成。
 
 ## 测试
 
