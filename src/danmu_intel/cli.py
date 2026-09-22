@@ -6,11 +6,15 @@
     danmu-intel contribution --match-id 1      # 每房间贡献量（条数/跨度/去重后条数）
     danmu-intel events --match-id 1            # 采集异常事件（待 T11 投递）
     danmu-intel match add --league LPL --team-a iG --team-b LNG --state ended
-    danmu-intel slice --match-id 1 --game-no 1 --start-ms … --end-ms …
+    danmu-intel boundaries --match-id 1        # 切片引擎：优先级裁决 + 冲突记录
+    danmu-intel slice --match-id 1 --game-no 1 --start-ms … --end-ms …   # 人工修正
     danmu-intel stats --match-id 1
-    danmu-intel render --match-id 1          # → site/matches/1.html
-    danmu-intel rebuild --match-id 1         # AC-13：删统计重算，断言结果不变
-    danmu-intel verify-sources --match-id 1  # 逐项复核 文件+行范围+SHA256
+    danmu-intel final --match-id 1             # 终局判定（≥3 类独立信号 + 2 分钟无反转）
+    danmu-intel gray --match-id 1              # 灰信号（只作风险提示，不点名）
+    danmu-intel config --set gray_min_users=3  # 统计门槛（改动留审计）
+    danmu-intel render --match-id 1            # → site/matches/1.html
+    danmu-intel rebuild --match-id 1           # AC-13：删统计重算，断言结果不变
+    danmu-intel verify-sources --match-id 1    # 逐项复核 文件+行范围+SHA256
 """
 
 from __future__ import annotations
@@ -23,16 +27,21 @@ import sys
 from datetime import datetime
 
 from danmu_intel.common import paths
+from danmu_intel.common.config import StatsConfig, load_stats_config, save_stats_config
 from danmu_intel.common.db import open_db
 from danmu_intel.common.matches import create_match, get_match
 from danmu_intel.pipeline import (
     collect_facts,
+    load_lines,
     rebuild_metrics,
     render_match_page,
     verify_sources,
     write_metrics,
 )
+from danmu_intel.slice import engine, signals
 from danmu_intel.slice.manual import add_manual_slice
+from danmu_intel.stats import final as final_signals
+from danmu_intel.stats.gray import reportable
 
 logger = logging.getLogger("danmu_intel")
 
@@ -224,10 +233,143 @@ def _cmd_slice(args: argparse.Namespace) -> int:
             override_by=args.override_by,
             override_reason=args.override_reason,
         )
+        version = engine.algo_version(conn, args.match_id)
     finally:
         conn.close()
     print(f"已写入切片 #{slice_id}：G{args.game_no} {args.start_ms}–{args.end_ms}（边界来源：manual）")
+    if args.override_by:
+        print(f"  人工修正已留痕：{args.override_by}｜{args.override_reason}｜算法版本 {version}")
     return 0
+
+
+def _parse_report_windows(values: list[str] | None) -> list[tuple[int, int, int]]:
+    windows: list[tuple[int, int, int]] = []
+    for value in values or []:
+        parts = value.split(":")
+        if len(parts) != 3:
+            raise ValueError(f"--report-window 格式应为 game_no:start_ms:end_ms，收到：{value}")
+        windows.append((int(parts[0]), int(parts[1]), int(parts[2])))
+    return windows
+
+
+def _cmd_boundaries(args: argparse.Namespace) -> int:
+    """切片引擎：官方 > 弹幕信号 > 报告窗口，冲突必记录，人工修正优先。"""
+    conn = open_db()
+    try:
+        match = get_match(conn, args.match_id)
+        config = load_stats_config(conn)
+        lines = load_lines(conn, args.match_id, data_root=paths.data_dir())
+        claims = signals.review(signals.moments(lines, config=config), config=config)
+        resolutions = engine.resolve_match(
+            conn,
+            args.match_id,
+            official_result=match.official_result,
+            lines=lines,
+            report_windows=_parse_report_windows(args.report_window),
+            config=config,
+            apply=not args.dry_run,
+            actor=args.actor,
+        )
+    finally:
+        conn.close()
+    for claim in claims:
+        verdict = "通过复核" if claim.verified else "复核不通过"
+        print(
+            f"弹幕信号候选：{claim.direction} @ {_stamp(claim.at_ms)}｜{verdict}｜"
+            f"信号类别 {'、'.join(claim.kinds) or '无'}｜{claim.note or '≥2 类独立信号'}"
+        )
+    if not resolutions:
+        print("没有可用的小局边界候选（官方数据、弹幕信号、报告窗口三者皆无）")
+        return 0
+    for resolved in resolutions:
+        action = "已写入" if not args.dry_run else "试算"
+        print(
+            f"{action} G{resolved.game_no}：{_stamp(resolved.start_ms)} – {_stamp(resolved.end_ms)}｜"
+            f"边界来源 {resolved.boundary_source}"
+        )
+        if resolved.conflict_note:
+            print(f"  冲突：{resolved.conflict_note}")
+    return 0
+
+
+def _cmd_final(args: argparse.Namespace) -> int:
+    """终局判定：≥3 类相互独立信号同时成立，且 2 分钟内无反转。"""
+    conn = open_db()
+    try:
+        facts = collect_facts(conn, args.match_id, data_root=paths.data_dir())
+    finally:
+        conn.close()
+    judgement = facts.final_judgement
+    print(f"终局判定：{judgement.verdict}｜{judgement.reason}")
+    if judgement.satisfied_at_ms:
+        print(f"  首次满足：{_stamp(judgement.satisfied_at_ms)}（{'、'.join(judgement.kinds)}）")
+    if judgement.decided_at_ms:
+        print(f"  判定时刻：{_stamp(judgement.decided_at_ms)}")
+    if judgement.reversal is not None:
+        print(f"  撤销：{judgement.reversal.detail}（{_stamp(judgement.reversal.at_ms)}）")
+    for fact in facts.signal_facts:
+        end = _stamp(fact.end_ms) if fact.end_ms else "观测结束仍成立"
+        print(f"  信号 {fact.kind}：{_stamp(fact.start_ms)} → {end}｜{json.dumps(fact.evidence, ensure_ascii=False)}")
+    if not facts.signal_facts:
+        print("  本场没有任何一类独立信号成立")
+    return 0
+
+
+def _cmd_gray(args: argparse.Namespace) -> int:
+    """灰信号：只作风险提示，不指控、不点名（输出里没有任何身份标识）。"""
+    conn = open_db()
+    try:
+        facts = collect_facts(conn, args.match_id, data_root=paths.data_dir())
+    finally:
+        conn.close()
+    config = facts.stats_config
+    print(
+        f"灰信号门槛（config）：命中 ≥{config.gray_min_hits} 次、独立发言者 ≥{config.gray_min_users} 人、"
+        f"覆盖时段 ≥{config.gray_min_windows} 个（时段宽 {config.gray_window_ms // 1000} 秒）"
+    )
+    reportable_signals = reportable(facts.gray_signals)
+    if not reportable_signals:
+        print("没有达到门槛的灰信号")
+    for signal in reportable_signals:
+        print(
+            f"【{signal.category_label}】{signal.keyword}：命中 {signal.hit_count} 条｜"
+            f"独立发言者 {signal.distinct_users} 人｜覆盖 {signal.window_count} 个时段｜{signal.status}"
+        )
+        for sample in signal.samples:
+            print(f"  样本：{_stamp(sample.ts)}｜{sample.text}（{sample.rel_path} 第 {sample.line_no} 行）")
+    for signal in facts.gray_signals:
+        if signal.status in reportable_signals:
+            continue
+        print(f"已作废：{signal.keyword}——{signal.reason}")
+    print("纪律：只作风险提示，不出现指控性结论、不指名任何个人或队伍；不提供对外导出。")
+    return 0
+
+
+def _cmd_config(args: argparse.Namespace) -> int:
+    """统计门槛（灰信号 N/M/K、终局信号门槛…）：改动留审计。"""
+    conn = open_db()
+    try:
+        if args.set:
+            changes = _parse_config_changes(args.set)
+            config = save_stats_config(conn, actor=args.actor, changes=changes)
+            print(f"已更新统计门槛（操作者 {args.actor}）：{json.dumps(changes, ensure_ascii=False)}")
+        else:
+            config = load_stats_config(conn)
+    finally:
+        conn.close()
+    for key, value in sorted(config.as_dict().items()):
+        print(f"{key} = {json.dumps(value, ensure_ascii=False)}")
+    return 0
+
+
+def _parse_config_changes(values: list[str]) -> dict[str, object]:
+    changes: dict[str, object] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"--set 格式应为 key=value，收到：{value}")
+        key, raw = value.split("=", 1)
+        changes[key.strip()] = json.loads(raw)
+    return changes
 
 
 def _cmd_stats(args: argparse.Namespace) -> int:
@@ -236,10 +378,17 @@ def _cmd_stats(args: argparse.Namespace) -> int:
         facts = collect_facts(conn, args.match_id, data_root=paths.data_dir())
         count = write_metrics(conn, facts)
         for game in facts.games:
+            metrics = game.metrics
+            top = metrics["peak"]
+            peak_note = f"峰值 {_stamp(int(top['t_start']))}（{top['count']} 条）" if top else "无显著峰值"
             print(
-                f"G{game.window.game_no}：{game.metrics['danmu_total']['count']} 条｜"
-                f"独立发言者 {game.metrics['distinct_users']['count']} 人"
+                f"G{game.window.game_no}：{metrics['danmu_total']['count']} 条｜"
+                f"独立发言者 {metrics['distinct_users']['count']} 人｜{peak_note}｜"
+                f"击杀轴 {len(metrics['kill_timeline']['events'])} 项｜边界来源 {game.window.boundary_source}"
             )
+        judgement = facts.final_judgement
+        print(f"终局判定：{judgement.verdict}（{judgement.reason}）")
+        print(f"灰信号：{len(facts.reportable_gray_signals)} 项达门槛（作废 {len(facts.gray_signals) - len(facts.reportable_gray_signals)} 项）")
         print(f"已写入 {count} 行规则统计（算法版本 {facts.algo_version}）")
     finally:
         conn.close()
@@ -329,19 +478,42 @@ def build_parser() -> argparse.ArgumentParser:
     add.add_argument("--official-result", default=None, help='JSON，如 {"score":"2:1"}')
     add.set_defaults(func=_cmd_match_add)
 
-    slice_cmd = sub.add_parser("slice", help="人工指定小局切片边界")
+    boundaries = sub.add_parser("boundaries", help="切片引擎：按优先级裁决小局边界并记录冲突")
+    boundaries.add_argument("--match-id", type=int, required=True)
+    boundaries.add_argument(
+        "--report-window", action="append", default=None,
+        metavar="GAME:START:END", help="已发布报告窗口（优先级 3），可重复",
+    )
+    boundaries.add_argument("--dry-run", action="store_true", help="只试算不落库")
+    boundaries.add_argument("--actor", default="boundary-engine", help="落库审计的操作者")
+    boundaries.set_defaults(func=_cmd_boundaries)
+
+    slice_cmd = sub.add_parser("slice", help="人工指定/修正小局切片边界")
     slice_cmd.add_argument("--match-id", type=int, required=True)
     slice_cmd.add_argument("--game-no", type=int, required=True)
     slice_cmd.add_argument("--start-ms", type=int, required=True)
     slice_cmd.add_argument("--end-ms", type=int, required=True)
     slice_cmd.add_argument("--note", default=None, help="冲突事实备注")
-    slice_cmd.add_argument("--override-by", default=None, help="人工修正操作者")
-    slice_cmd.add_argument("--override-reason", default=None, help="人工修正理由")
+    slice_cmd.add_argument("--override-by", default=None, help="人工修正操作者（覆盖已有边界时必填）")
+    slice_cmd.add_argument("--override-reason", default=None, help="人工修正理由（覆盖已有边界时必填）")
     slice_cmd.set_defaults(func=_cmd_slice)
 
-    stats = sub.add_parser("stats", help="计算并写入规则统计")
+    stats = sub.add_parser("stats", help="计算并写入规则统计（统计全集）")
     stats.add_argument("--match-id", type=int, required=True)
     stats.set_defaults(func=_cmd_stats)
+
+    final_cmd = sub.add_parser("final", help="终局判定：≥3 类独立信号 + 2 分钟无反转")
+    final_cmd.add_argument("--match-id", type=int, required=True)
+    final_cmd.set_defaults(func=_cmd_final)
+
+    gray_cmd = sub.add_parser("gray", help="灰信号（只作风险提示，不指控、不点名）")
+    gray_cmd.add_argument("--match-id", type=int, required=True)
+    gray_cmd.set_defaults(func=_cmd_gray)
+
+    config_cmd = sub.add_parser("config", help="查看/修改统计门槛（改动留审计）")
+    config_cmd.add_argument("--set", action="append", default=None, metavar="KEY=VALUE", help="改门槛，可重复")
+    config_cmd.add_argument("--actor", default="管理员", help="操作者（进审计）")
+    config_cmd.set_defaults(func=_cmd_config)
 
     render = sub.add_parser("render", help="生成十一段静态页")
     render.add_argument("--match-id", type=int, required=True)
