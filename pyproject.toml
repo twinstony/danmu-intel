@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "danmu-intel"
+version = "0.1.0"
+description = "弹幕情报库：采集 → 切片 → 规则统计 → 静态报告页"
+requires-python = ">=3.11"
+dependencies = ["aiohttp>=3.9"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "pytest-cov>=5"]
+
+[project.scripts]
+danmu-intel = "danmu_intel.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q --cov=danmu_intel --cov-report=term-missing --cov-fail-under=90"
+filterwarnings = ["error"]

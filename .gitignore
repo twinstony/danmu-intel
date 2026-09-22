@@ -19,3 +19,7 @@ htmlcov/
 *.swp
 .vscode/
 .idea/
+
+# 录制帧临时落盘/站点暂存
+.frames-dump/
+site/.staging/
