@@ -92,9 +92,10 @@ class Ledger:
 
 @pytest.fixture
 def ledger(data_root, conn) -> Ledger:
-    """G1：BASE_TS..+60s 内 30 条；G2：+120s..+180s 内 10 条。"""
-    events = [make_event(BASE_TS + i * 2_000, text=f"G1 弹幕 {i}") for i in range(30)]
-    events += [make_event(BASE_TS + 120_000 + i * 6_000, text=f"G2 弹幕 {i}") for i in range(10)]
+    """G1：[BASE_TS, +300s) 内 55 条（含 45 条突发，构成峰值窗口）；G2：后 60s 内 10 条。"""
+    events = [make_event(BASE_TS + i * 3_000, text=f"G1 散落 {i}") for i in range(10)]
+    events += [make_event(BASE_TS + 60_000 + i * 1_000, text=f"G1 突发 {i}") for i in range(45)]
+    events += [make_event(BASE_TS + 300_000 + i * 6_000, text=f"G2 弹幕 {i}") for i in range(10)]
     digest = write_jsonl(data_root / REL_PATH, events)
 
     match_id = create_match(
@@ -114,18 +115,18 @@ def ledger(data_root, conn) -> Ledger:
     conn.execute(
         "INSERT INTO room_sessions(room_id, match_id, pid, started_at, ended_at, state, last_msg_at) "
         "VALUES(?, ?, 1, ?, ?, 'exited', ?)",
-        (room_row_id, match_id, BASE_TS, BASE_TS + 200_000, BASE_TS + 180_000),
+        (room_row_id, match_id, BASE_TS, BASE_TS + 400_000, BASE_TS + 354_000),
     )
     session_id = conn.execute("SELECT id FROM room_sessions").fetchone()["id"]
     conn.execute(
         "INSERT INTO danmu_segments(room_session_id, rel_path, sha256, first_ts, last_ts, msg_count, sealed_at) "
         "VALUES(?, ?, ?, ?, ?, ?, ?)",
-        (session_id, REL_PATH, digest, events[0].ts, events[-1].ts, len(events), BASE_TS + 200_000),
+        (session_id, REL_PATH, digest, events[0].ts, events[-1].ts, len(events), BASE_TS + 400_000),
     )
     conn.commit()
 
-    game1 = (BASE_TS, BASE_TS + 60_000)
-    game2 = (BASE_TS + 120_000, BASE_TS + 180_000)
+    game1 = (BASE_TS, BASE_TS + 300_000)
+    game2 = (BASE_TS + 300_000, BASE_TS + 360_000)
     add_manual_slice(conn, match_id=match_id, game_no=1, start_ms=game1[0], end_ms=game1[1])
     add_manual_slice(conn, match_id=match_id, game_no=2, start_ms=game2[0], end_ms=game2[1])
 

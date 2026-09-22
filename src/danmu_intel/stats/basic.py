@@ -117,10 +117,16 @@ def compute(lines: list[RawLine], window: SliceWindow) -> dict[str, dict[str, ob
 
 
 def peak_sample(scoped: list[RawLine], top: dict[str, object]) -> list[dict[str, object]]:
-    """峰值窗口内容摘要：取样若干条原文 + 取证坐标（设计 §9.1）。"""
+    """峰值窗口内容摘要：取样若干条原文 + 取证坐标（设计 §9.1）。
+
+    按时间排序后取样，保证与输入顺序无关（可重算性）。
+    """
     start = int(top["t_start"])  # type: ignore[arg-type]
     end = int(top["t_end"])  # type: ignore[arg-type]
-    inside = [line for line in scoped if start <= line.event.ts < end]
+    inside = sorted(
+        (line for line in scoped if start <= line.event.ts < end),
+        key=lambda line: (line.event.ts, line.line_no),
+    )
     return [
         {"rel_path": line.rel_path, "line_no": line.line_no, "ts": line.event.ts, "text": line.event.text}
         for line in inside[:SAMPLE_SIZE]

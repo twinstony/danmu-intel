@@ -20,7 +20,7 @@ from danmu_intel.common import paths
 from danmu_intel.common.matches import get_match
 from danmu_intel.common.sources import SourceRef, verify
 from danmu_intel.report.facts import GameFacts, MatchFacts, SegmentFacts
-from danmu_intel.report.html import render_html
+from danmu_intel.report.html import parse_sources, render_html
 from danmu_intel.report.rule_render import build_report
 from danmu_intel.slice.manual import load_slices
 from danmu_intel.stats.basic import ALGO_VERSION, RawLine, compute
@@ -134,11 +134,15 @@ def metrics_snapshot(conn: sqlite3.Connection, match_id: int) -> list[tuple[int,
 def rebuild_metrics(
     conn: sqlite3.Connection, match_id: int, *, data_root: Path | None = None
 ) -> bool:
-    """AC-13 自检：删掉统计结果，仅凭原始记录 + 切片重算，比对是否逐字节相同。"""
+    """AC-13 自检：删掉统计结果，仅凭原始记录 + 切片重算，比对是否逐字节相同。
+
+    若库里原本没有统计结果，先按当前原始记录算一份基线再比对。
+    """
+    if not metrics_snapshot(conn, match_id):
+        write_metrics(conn, collect_facts(conn, match_id, data_root=data_root))
     before = metrics_snapshot(conn, match_id)
     clear_metrics(conn, match_id)
-    facts = collect_facts(conn, match_id, data_root=data_root)
-    write_metrics(conn, facts)
+    write_metrics(conn, collect_facts(conn, match_id, data_root=data_root))
     return metrics_snapshot(conn, match_id) == before
 
 
@@ -154,13 +158,21 @@ def render_match_page(
 
 
 def report_sources(conn: sqlite3.Connection, match_id: int, *, data_root: Path | None = None) -> list[SourceRef]:
+    """本场报告**当前**会引用到的来源（渲染用；校验请用 `verify_sources`）。"""
     facts = collect_facts(conn, match_id, data_root=data_root)
     return [ref for segment in build_report(facts) for ref in segment.sources]
 
 
 def verify_sources(
-    conn: sqlite3.Connection, match_id: int, *, data_root: Path | None = None
+    match_id: int, *, data_root: Path | None = None, page_path: Path | None = None
 ) -> list[SourceRef]:
-    """返回**校验失败**的来源引用（空列表即全部通过）。"""
+    """对着**已生成的页面**逐项复核来源，返回**校验失败**的引用（空列表即全部通过）。
+
+    校验对象是产物里冻结的哈希，而不是刚刚现算的哈希，因此能真正发现
+    「页面发出之后原始记录被改动」。
+    """
     root = data_root or paths.data_dir()
-    return [ref for ref in report_sources(conn, match_id, data_root=root) if not verify(ref, data_root=root)]
+    page = page_path or paths.match_page_path(match_id)
+    if not page.exists():
+        raise LookupError(f"页面尚未生成：{page}（请先运行 render）")
+    return [ref for ref in parse_sources(page.read_text(encoding="utf-8")) if not verify(ref, data_root=root)]

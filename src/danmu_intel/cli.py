@@ -19,7 +19,7 @@ import sys
 
 from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
-from danmu_intel.common.matches import create_match
+from danmu_intel.common.matches import create_match, get_match
 from danmu_intel.pipeline import (
     collect_facts,
     rebuild_metrics,
@@ -38,15 +38,20 @@ def _cmd_collect(args: argparse.Namespace) -> int:
 
     adapter = get_adapter(args.platform)
     room = adapter.parse_room(args.url)
-    result = asyncio.run(
-        run_session(
-            room,
-            adapter=adapter,
-            match_id=args.match_id,
-            seconds=args.seconds,
-            conn=open_db(),
+    conn = open_db()
+    try:
+        get_match(conn, args.match_id)  # 先确认比赛存在：采集必须挂在某场比赛上
+        result = asyncio.run(
+            run_session(
+                room,
+                adapter=adapter,
+                match_id=args.match_id,
+                seconds=args.seconds,
+                conn=conn,
+            )
         )
-    )
+    finally:
+        conn.close()
     probe = result.probe
     if probe:
         print(f"房间：{room.platform}/{room.room_id}｜{probe.streamer or '未知主播'}｜开播={probe.is_live}")
@@ -136,11 +141,11 @@ def _cmd_rebuild(args: argparse.Namespace) -> int:
 
 
 def _cmd_verify_sources(args: argparse.Namespace) -> int:
-    conn = open_db()
     try:
-        failed = verify_sources(conn, args.match_id, data_root=paths.data_dir())
-    finally:
-        conn.close()
+        failed = verify_sources(args.match_id, data_root=paths.data_dir())
+    except LookupError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
     if not failed:
         print("全部来源校验通过（文件 + 行范围 + SHA256）")
         return 0
@@ -158,7 +163,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--url", required=True, help="直播间链接或房间号")
     collect.add_argument("--platform", default="huya", help="平台标识（默认 huya）")
     collect.add_argument("--seconds", type=float, default=None, help="采集时长（秒），缺省则持续采集")
-    collect.add_argument("--match-id", type=int, default=None, help="关联的比赛 id")
+    collect.add_argument("--match-id", type=int, required=True, help="关联的比赛 id（先 match add）")
     collect.set_defaults(func=_cmd_collect)
 
     match = sub.add_parser("match", help="比赛实体")

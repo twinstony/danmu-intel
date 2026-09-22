@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from html import escape
 
 from danmu_intel.common.sources import SourceRef
@@ -40,6 +41,29 @@ details ul { margin: 8px 0 0; padding-left: 20px; }
 code { word-break: break-all; font-size: 12px; }
 footer { color: #666; font-size: 13px; padding: 16px 0 32px; }
 """
+
+
+SOURCE_ITEM_RE = re.compile(
+    r"<li><code>(?P<rel_path>[^<]+)</code>\s*第\s*(?P<line_start>\d+)\u2013(?P<line_end>\d+)\s*行\s*·\s*"
+    r"SHA256\s*<code>(?P<sha256>[0-9a-f]{64})</code></li>"
+)
+
+
+def parse_sources(html: str) -> list[SourceRef]:
+    """从**已生成的页面**里取回冻结的来源引用。
+
+    校验必须对着产物里记下的哈希来比对当前文件，而不是现算一遍——
+    现算等于把「证据有没有被改过」这个问题问成了「文件现在长什么样」。
+    """
+    return [
+        SourceRef(
+            rel_path=match.group("rel_path"),
+            line_start=int(match.group("line_start")),
+            line_end=int(match.group("line_end")),
+            sha256=match.group("sha256"),
+        )
+        for match in SOURCE_ITEM_RE.finditer(html)
+    ]
 
 
 def _render_sources(refs: tuple[SourceRef, ...]) -> str:

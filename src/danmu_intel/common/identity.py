@@ -18,9 +18,8 @@ SALT_BYTES = 32
 HASH_LENGTH = 32
 
 
-@lru_cache(maxsize=8)
-def load_salt(path: Path | None = None) -> bytes:
-    target = path or paths.salt_path()
+@lru_cache(maxsize=16)
+def _load_or_create(target: Path) -> bytes:
     if target.exists():
         return target.read_bytes()
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -32,6 +31,11 @@ def load_salt(path: Path | None = None) -> bytes:
     with os.fdopen(fd, "wb") as handle:
         handle.write(salt)
     return salt
+
+
+def load_salt(path: Path | None = None) -> bytes:
+    """读取（首次使用时生成）盐值。缓存按**解析后的路径**分桶，切数据目录即换盐。"""
+    return _load_or_create(path or paths.salt_path())
 
 
 def user_hash(platform: str, uid: str) -> str:
