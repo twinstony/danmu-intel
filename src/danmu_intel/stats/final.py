@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from typing import Any, Iterable, Sequence
 
 from danmu_intel.common.config import StatsConfig
+from danmu_intel.common.lexicon import ANNOUNCE_LEXICON, END_LEXICON, matches
 from danmu_intel.stats.basic import STEP_MS, WINDOW_MS, RawLine, density_curve
 
 #: 四类独立信号（需求 §6.4 ①②③④）。
@@ -48,11 +49,27 @@ VERDICT_FINAL = "final"
 VERDICT_LIVE = "live"
 VERDICT_REVOKED = "revoked"
 
-#: 终结类弹幕词法模式（需求 §6.4 ①「终结类弹幕」）。
-END_LEXICON = ("结束", "GG", "gg", "恭喜", "赢了", "输了", "收官", "拿下", "再见", "终局")
-
-#: 宣告类词法模式（需求 §6.4 ④「官方渠道或主播明确宣布」）。
-ANNOUNCE_LEXICON = ("官宣", "宣布", "下播", "本场结束", "比赛结束")
+#: 词表在 `common/lexicon.py`（与切片层共用同一份，见该模块注释）。
+__all__ = [
+    "ANNOUNCE_LEXICON",
+    "END_LEXICON",
+    "REVERSAL_KINDS",
+    "SIGNAL_KINDS",
+    "SIGNAL_LABELS",
+    "VERDICT_FINAL",
+    "VERDICT_LIVE",
+    "VERDICT_REVOKED",
+    "FinalJudgement",
+    "Reversal",
+    "SignalFact",
+    "active_kinds",
+    "announcement_fact",
+    "collect_signal_facts",
+    "end_burst_fact",
+    "judge_final",
+    "score_confirmed_fact",
+    "traffic_drop_fact",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,7 +265,7 @@ def _runs(points: Sequence[dict[str, int]], predicate) -> list[list[dict[str, in
 
 def end_burst_fact(lines: Sequence[RawLine], *, observed_until_ms: int, config: StatsConfig) -> SignalFact | None:
     """需求 §6.4 ①：终结类弹幕高密度聚集并持续不短于 2 分钟。"""
-    hits = [line.event.ts for line in lines if _matches(line.event.text, END_LEXICON)]
+    hits = [line.event.ts for line in lines if matches(line.event.text, END_LEXICON)]
     if not hits:
         return None
     points = density_curve(hits, min(hits), observed_until_ms)
@@ -332,7 +349,7 @@ def announcement_fact(
             end_ms=None,
             evidence={"channel": "official", "detail": "比赛结束时间已由官方数据登记"},
         )
-    hits = [line.event.ts for line in lines if _matches(line.event.text, ANNOUNCE_LEXICON)]
+    hits = [line.event.ts for line in lines if matches(line.event.text, ANNOUNCE_LEXICON)]
     if len(hits) < 2:
         return None
     ordered = sorted(hits)
@@ -346,10 +363,6 @@ def announcement_fact(
                 evidence={"channel": "danmu", "hits": len(window), "detail": "宣告词在 2 分钟内多次出现"},
             )
     return None
-
-
-def _matches(text: str, lexicon: Sequence[str]) -> bool:
-    return any(word in text for word in lexicon)
 
 
 def collect_signal_facts(
