@@ -10,15 +10,27 @@ from danmu_intel.common import paths
 from danmu_intel.pipeline import (
     clear_metrics,
     collect_facts,
+    generate_and_publish,
     load_lines,
     load_segment_facts,
     metrics_snapshot,
     rebuild_metrics,
-    render_match_page,
-    report_sources,
     verify_sources,
     write_metrics,
 )
+
+GENERATED_AT = 1_790_064_400_000
+
+
+def publish(ledger, kind: str = "full", **kwargs):
+    return generate_and_publish(
+        ledger.conn,
+        ledger.match_id,
+        kind=kind,
+        data_root=ledger.data_root,
+        generated_at=GENERATED_AT,
+        **kwargs,
+    )
 
 
 def test_collect_facts_shape(ledger):
@@ -89,37 +101,44 @@ def test_rebuild_detects_missing_slice(ledger):
     assert rebuild_metrics(ledger.conn, ledger.match_id, data_root=ledger.data_root) is False
 
 
-def test_render_match_page(ledger, site_root):
-    path = render_match_page(ledger.conn, ledger.match_id, data_root=ledger.data_root)
-    assert path == site_root / "matches" / f"{ledger.match_id}.html"
-    html = path.read_text(encoding="utf-8")
+def test_publish_writes_page_and_row(ledger, site_root):
+    result = publish(ledger)
+    assert result.path == site_root / "matches" / str(ledger.match_id) / "full.html"
+    html = result.path.read_text(encoding="utf-8")
     assert html.count('<section class="seg ') == 11
     assert "比赛信息" in html and "数据与溯源" in html
+    row = ledger.conn.execute("SELECT * FROM reports").fetchone()
+    assert row["state"] == "published"
+    assert row["path"] == f"matches/{ledger.match_id}/full.html"
+    assert row["generated_at"] == GENERATED_AT
+    assert row["llm_state"] == "rule_fallback"
+    assert row["fact_layer_hash"] == result.content.fact_layer_hash
+    assert json.loads(row["content_json"])["kind"] == "full"
 
 
 def test_verify_sources_passes_then_fails_after_tampering(ledger):
-    render_match_page(ledger.conn, ledger.match_id, data_root=ledger.data_root)
-    assert verify_sources(ledger.match_id, data_root=ledger.data_root) == []
-    assert report_sources(ledger.conn, ledger.match_id, data_root=ledger.data_root)
+    publish(ledger)
+    assert verify_sources(ledger.match_id, kind="full", data_root=ledger.data_root) == []
 
     path = ledger.data_root / ledger.rel_path
     path.write_text(path.read_text(encoding="utf-8").replace("G1 突发 0", "G1 突发 X"), encoding="utf-8")
-    failed = verify_sources(ledger.match_id, data_root=ledger.data_root)
+    failed = verify_sources(ledger.match_id, kind="full", data_root=ledger.data_root)
     assert failed, "篡改原始记录后来源校验必须失败"
     assert {ref.rel_path for ref in failed} == {ledger.rel_path}
 
 
 def test_verify_sources_requires_rendered_page(ledger, site_root):
     with pytest.raises(LookupError, match="页面尚未生成"):
-        verify_sources(ledger.match_id, data_root=ledger.data_root)
+        verify_sources(ledger.match_id, kind="review", data_root=ledger.data_root)
 
 
-def test_render_match_page_without_slices(ledger, site_root):
+def test_publish_without_slices(ledger, site_root):
     ledger.conn.execute("DELETE FROM slices")
     ledger.conn.commit()
     facts = collect_facts(ledger.conn, ledger.match_id, data_root=ledger.data_root)
     assert facts.games == ()
-    html = render_match_page(ledger.conn, ledger.match_id, data_root=ledger.data_root).read_text(encoding="utf-8")
+    result = publish(ledger)
+    html = result.path.read_text(encoding="utf-8")
     assert html.count('<section class="seg ') == 11, "没有切片也必须产出十一段（不可缺段）"
 
 
@@ -131,7 +150,9 @@ def test_load_segment_facts_uses_declared_index(ledger):
     assert len(facts[0].sha256) == 64
 
 
-def test_render_match_page_requires_existing_match(ledger, site_root):
+def test_publish_requires_existing_match(ledger, site_root):
     with pytest.raises(LookupError):
-        render_match_page(ledger.conn, 999, data_root=ledger.data_root)
+        generate_and_publish(
+            ledger.conn, 999, kind="full", data_root=ledger.data_root, generated_at=GENERATED_AT
+        )
     assert paths.site_dir() == site_root

@@ -1,9 +1,9 @@
-"""流水线：原始记录 + 切片 → 规则统计 → 十一段 → 静态页。
+"""流水线：原始记录 + 切片 → 规则统计 → 报告三形态 → 静态页。
 
-一条命令跑通整条链路的收口处（T1 的端到端目标）：
+一条命令跑通整条链路的收口处：
 
     collect（落盘+建库） → match add / slice（人工定边界） → stats（规则统计）
-    → render（十一段静态页） → verify（逐项 SHA256 复核）
+    → report（三形态报告 + 发布检查） → verify-sources（逐项 SHA256 复核）
 
 设计 §9 的铁律在这里的体现：`rebuild_metrics` 能**删掉统计结果后仅凭原始记录 +
 切片**重算出逐字节相同的统计（AC-13）。
@@ -19,9 +19,12 @@ from pathlib import Path
 from danmu_intel.common import paths
 from danmu_intel.common.matches import get_match
 from danmu_intel.common.sources import SourceRef, verify
-from danmu_intel.report.facts import GameFacts, MatchFacts, SegmentFacts
-from danmu_intel.report.html import parse_sources, render_html
-from danmu_intel.report.rule_render import build_report
+from danmu_intel.report.assemble import build_content
+from danmu_intel.report.facts import GameFacts, MatchFacts, SegmentFacts, scope_facts
+from danmu_intel.report.forms import ReportScope, Timing, form_of
+from danmu_intel.report.html import parse_sources
+from danmu_intel.report.interpreter import Interpreter
+from danmu_intel.report.publish import PublishResult, next_version, publish
 from danmu_intel.slice.manual import load_slices
 from danmu_intel.stats.basic import ALGO_VERSION, RawLine, compute
 
@@ -146,25 +149,48 @@ def rebuild_metrics(
     return metrics_snapshot(conn, match_id) == before
 
 
-def render_match_page(
-    conn: sqlite3.Connection, match_id: int, *, data_root: Path | None = None
-) -> Path:
-    """生成静态页 `site/matches/<id>.html`，返回产物路径。"""
-    facts = collect_facts(conn, match_id, data_root=data_root)
-    target = paths.match_page_path(match_id)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_html(facts), encoding="utf-8")
-    return target
+def generate_and_publish(
+    conn: sqlite3.Connection,
+    match_id: int,
+    *,
+    kind: str,
+    completed_games: tuple[int, ...] | None = None,
+    trigger_game_no: int | None = None,
+    interpreter: Interpreter | None = None,
+    data_root: Path | None = None,
+    clock=None,
+    generated_at: int | None = None,
+) -> PublishResult:
+    """报告三形态的统一入口：取材 → 组装 → 检查 → 发布（版本递增）。
 
-
-def report_sources(conn: sqlite3.Connection, match_id: int, *, data_root: Path | None = None) -> list[SourceRef]:
-    """本场报告**当前**会引用到的来源（渲染用；校验请用 `verify_sources`）。"""
-    facts = collect_facts(conn, match_id, data_root=data_root)
-    return [ref for segment in build_report(facts) for ref in segment.sources]
+    `completed_games` 是本次发布覆盖的节点（小局）：赛中快报只发布已完成节点
+    （缺省即全部已登记的小局）；赛后形态不传。时限按形态的 `deadline_ms` 对齐。
+    """
+    form = form_of(kind)
+    timing = Timing(clock=clock)
+    facts = scope_facts(
+        collect_facts(conn, match_id, data_root=data_root),
+        ReportScope(completed_games=completed_games, trigger_game_no=trigger_game_no),
+    )
+    timing.mark("stats_ready")
+    content = build_content(
+        facts,
+        form=form,
+        version=next_version(conn, match_id, kind),
+        generated_at=generated_at if generated_at is not None else now_ms(),
+        interpreter=interpreter,
+        trigger_game_no=trigger_game_no,
+        timing=timing,
+    )
+    return publish(conn, content, data_root=facts.data_root, timing=timing)
 
 
 def verify_sources(
-    match_id: int, *, data_root: Path | None = None, page_path: Path | None = None
+    match_id: int,
+    *,
+    kind: str,
+    data_root: Path | None = None,
+    page_path: Path | None = None,
 ) -> list[SourceRef]:
     """对着**已生成的页面**逐项复核来源，返回**校验失败**的引用（空列表即全部通过）。
 
@@ -172,7 +198,7 @@ def verify_sources(
     「页面发出之后原始记录被改动」。
     """
     root = data_root or paths.data_dir()
-    page = page_path or paths.match_page_path(match_id)
+    page = page_path or paths.report_page_path(match_id, kind)
     if not page.exists():
-        raise LookupError(f"页面尚未生成：{page}（请先运行 render）")
+        raise LookupError(f"页面尚未生成：{page}（请先运行 report --kind {kind}）")
     return [ref for ref in parse_sources(page.read_text(encoding="utf-8")) if not verify(ref, data_root=root)]

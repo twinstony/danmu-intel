@@ -129,6 +129,16 @@ class Timing:
 
 
 @dataclass(frozen=True, slots=True)
+class ReportHeader:
+    """一份报告实例的元信息（进第 10 段「数据与溯源」，也是 reports 行的键字段）。"""
+
+    kind: str
+    version: int
+    fact_layer_hash: str
+    llm_state: str
+
+
+@dataclass(frozen=True, slots=True)
 class ReportScope:
     """一份报告的取材范围：本次发布覆盖哪些节点（小局）。
 

@@ -2,7 +2,7 @@
 
 表按能力分批加，**不预留空表**：T1 是 `matches` / `rooms` / `room_sessions` /
 `danmu_segments` / `slices` / `metrics` 六张；T2 加 `notifications`（采集异常事件
-的出口，投递由 T11 接）。
+的出口，投递由 T11 接）；T5 加 `reports`（报告三形态的版本账本）。
 
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
@@ -56,6 +56,17 @@ CREATE TABLE IF NOT EXISTS metrics(            -- 规则统计产物（可重算
   id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL, game_no INTEGER,
   metric_key TEXT NOT NULL,      -- density_curve|peak|score|kill_timeline|...
   value_json TEXT NOT NULL, computed_at INTEGER NOT NULL, algo_version TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS reports(            -- 报告实例（同场同形态换版即新增行，旧版可溯）
+  id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL, game_no INTEGER,   -- 快报：触发它的小局
+  kind TEXT NOT NULL,            -- live_brief|full|review
+  version INTEGER NOT NULL, generated_at INTEGER NOT NULL,
+  state TEXT NOT NULL,           -- published|failed
+  content_json TEXT NOT NULL,    -- 段级内容（十一段结构）
+  fact_layer_hash TEXT NOT NULL, -- 解读层输入的指纹（可溯源性）
+  llm_state TEXT NOT NULL,       -- llm|rule_fallback
+  path TEXT, checks_json TEXT, timing_json TEXT,
+  UNIQUE(match_id, kind, version));
 
 CREATE TABLE IF NOT EXISTS notifications(      -- 待投递事件（采集异常事件的出口）
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL,

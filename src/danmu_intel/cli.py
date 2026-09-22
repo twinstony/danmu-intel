@@ -8,9 +8,12 @@
     danmu-intel match add --league LPL --team-a iG --team-b LNG --state ended
     danmu-intel slice --match-id 1 --game-no 1 --start-ms … --end-ms …
     danmu-intel stats --match-id 1
-    danmu-intel render --match-id 1          # → site/matches/1.html
-    danmu-intel rebuild --match-id 1         # AC-13：删统计重算，断言结果不变
-    danmu-intel verify-sources --match-id 1  # 逐项复核 文件+行范围+SHA256
+    danmu-intel report --match-id 1 --kind live_brief --completed-game 1  # 赛中快报（节点结束）
+    danmu-intel report --match-id 1 --kind full     # 完整版 → site/matches/1/full.html
+    danmu-intel report --match-id 1 --kind review   # 复盘版 → site/matches/1/review.html
+    danmu-intel reports --match-id 1                # 已发布的报告版本（FR-C4-9）
+    danmu-intel rebuild --match-id 1                # AC-13：删统计重算，断言结果不变
+    danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核 文件+行范围+SHA256
 """
 
 from __future__ import annotations
@@ -27,11 +30,13 @@ from danmu_intel.common.db import open_db
 from danmu_intel.common.matches import create_match, get_match
 from danmu_intel.pipeline import (
     collect_facts,
+    generate_and_publish,
     rebuild_metrics,
-    render_match_page,
     verify_sources,
     write_metrics,
 )
+from danmu_intel.report.forms import form_of
+from danmu_intel.report.publish import PublishRefused, list_reports
 from danmu_intel.slice.manual import add_manual_slice
 
 logger = logging.getLogger("danmu_intel")
@@ -246,13 +251,52 @@ def _cmd_stats(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_render(args: argparse.Namespace) -> int:
+def _cmd_report(args: argparse.Namespace) -> int:
+    completed = tuple(sorted(set(args.completed_game))) if args.completed_game else None
     conn = open_db()
     try:
-        path = render_match_page(conn, args.match_id, data_root=paths.data_dir())
+        try:
+            result = generate_and_publish(
+                conn,
+                args.match_id,
+                kind=args.kind,
+                completed_games=completed,
+                trigger_game_no=args.trigger_game,
+                data_root=paths.data_dir(),
+            )
+        except PublishRefused as exc:
+            for item in exc.failures:
+                print(f"  发布检查未通过：{item.label}｜{item.detail}", file=sys.stderr)
+            print(f"错误：{exc}", file=sys.stderr)
+            return 1
     finally:
         conn.close()
-    print(f"已生成静态页：{path}")
+    form = form_of(result.kind)
+    print(f"已发布{form.label} v{result.version}：{result.path}")
+    print(
+        f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
+        f"事实层哈希 {result.content.fact_layer_hash}"
+    )
+    for item in result.checks:
+        print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")
+    return 0
+
+
+def _cmd_reports(args: argparse.Namespace) -> int:
+    conn = open_db()
+    try:
+        rows = list_reports(conn, args.match_id)
+    finally:
+        conn.close()
+    if not rows:
+        print(f"比赛 #{args.match_id} 还没有发布过报告")
+        return 0
+    for row in rows:
+        node = f"G{row.game_no}" if row.game_no is not None else "-"
+        print(
+            f"{row.kind} v{row.version}｜{row.state}｜节点 {node}｜"
+            f"解读层 {row.llm_state}｜事实层 {row.fact_layer_hash[:12]}…｜{row.path or '-'}"
+        )
     return 0
 
 
@@ -271,7 +315,7 @@ def _cmd_rebuild(args: argparse.Namespace) -> int:
 
 def _cmd_verify_sources(args: argparse.Namespace) -> int:
     try:
-        failed = verify_sources(args.match_id, data_root=paths.data_dir())
+        failed = verify_sources(args.match_id, kind=args.kind, data_root=paths.data_dir())
     except LookupError as exc:
         print(f"错误：{exc}", file=sys.stderr)
         return 2
@@ -284,7 +328,7 @@ def _cmd_verify_sources(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→静态页）")
+    parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→报告三形态）")
     parser.add_argument("--verbose", action="store_true", help="打印重连等运行日志")
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -343,16 +387,30 @@ def build_parser() -> argparse.ArgumentParser:
     stats.add_argument("--match-id", type=int, required=True)
     stats.set_defaults(func=_cmd_stats)
 
-    render = sub.add_parser("render", help="生成十一段静态页")
-    render.add_argument("--match-id", type=int, required=True)
-    render.set_defaults(func=_cmd_render)
+    report = sub.add_parser("report", help="生成并发布一份报告（三形态）")
+    report.add_argument("--match-id", type=int, required=True)
+    report.add_argument("--kind", required=True, help="live_brief（赛中快报）| full（完整版）| review（复盘版）")
+    report.add_argument(
+        "--completed-game",
+        type=int,
+        action="append",
+        metavar="N",
+        help="已完成节点（小局）的局号，可重复；缺省即全部已登记的小局（赛中快报只发布已完成节点）",
+    )
+    report.add_argument("--trigger-game", type=int, default=None, help="触发本次发布的节点（小局）局号")
+    report.set_defaults(func=_cmd_report)
+
+    reports = sub.add_parser("reports", help="已发布的报告版本（按形态与版本）")
+    reports.add_argument("--match-id", type=int, required=True)
+    reports.set_defaults(func=_cmd_reports)
 
     rebuild = sub.add_parser("rebuild", help="AC-13 自检：删统计后重算并比对")
     rebuild.add_argument("--match-id", type=int, required=True)
     rebuild.set_defaults(func=_cmd_rebuild)
 
-    verify = sub.add_parser("verify-sources", help="复核页面全部来源的 SHA256")
+    verify = sub.add_parser("verify-sources", help="复核已发布页面全部来源的 SHA256")
     verify.add_argument("--match-id", type=int, required=True)
+    verify.add_argument("--kind", required=True, help="报告形态：live_brief | full | review")
     verify.set_defaults(func=_cmd_verify_sources)
 
     return parser

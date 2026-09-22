@@ -1,4 +1,4 @@
-"""端到端：一条条命令跑通「采集 → 落盘 → 采集切片 → 统计 → 十一段静态页」。
+"""端到端：一条条命令跑通「采集 → 落盘 → 人工切片 → 统计 → 完整版报告发布」。
 
 **全程不连外网**：平台数据用录制帧回放（NFR-GA-4）。对应 issue #4 的验收标准：
 JSONL 路径与字段符合契约、行数与采集计数一致、页含全部十一段且标题与 §6.6 逐字一致、
@@ -81,14 +81,14 @@ def test_worst_case_chain_from_collect_to_page(replayed, data_root, site_root, c
                  "--start-ms", str(start), "--end-ms", str(end)]) == 0  # 同上边界可重复执行
     capsys.readouterr()
 
-    # ④ 基础统计 + ⑤ 规则直出十一段静态页
+    # ④ 基础统计 + ⑤ 规则直出十一段报告并发布
     assert main(["stats", "--match-id", str(match_id)]) == 0
     stats_out = capsys.readouterr().out
     assert f"G1：{collected} 条" in stats_out
-    assert main(["render", "--match-id", str(match_id)]) == 0
+    assert main(["report", "--match-id", str(match_id), "--kind", "full"]) == 0
     capsys.readouterr()
 
-    page = site_root / "matches" / f"{match_id}.html"
+    page = site_root / "matches" / str(match_id) / "full.html"
     html = page.read_text(encoding="utf-8")
     for spec in SEGMENTS:
         assert f'id="seg-{spec.no}"' in html
@@ -99,7 +99,7 @@ def test_worst_case_chain_from_collect_to_page(replayed, data_root, site_root, c
     refs = parse_sources(html)
     assert refs, "页面上必须能取到来源引用"
     assert all(ref.rel_path == rel_path for ref in refs)
-    assert verify_sources(match_id, data_root=data_root) == []
+    assert verify_sources(match_id, kind="full", data_root=data_root) == []
 
     # ⑦ AC-13：删掉统计结果后，仅凭原始记录 + 切片能重算出同样的统计
     assert main(["rebuild", "--match-id", str(match_id)]) == 0
@@ -123,12 +123,12 @@ def test_page_still_complete_when_no_peak(replayed, data_root, site_root, capsys
 
     assert main(["slice", "--match-id", str(match_id), "--game-no", "1",
                  "--start-ms", str(min(times)), "--end-ms", str(max(times) + 1)]) == 0
-    assert main(["render", "--match-id", str(match_id)]) == 0
+    assert main(["report", "--match-id", str(match_id), "--kind", "full"]) == 0
     capsys.readouterr()
-    html = (site_root / "matches" / f"{match_id}.html").read_text(encoding="utf-8")
+    html = (site_root / "matches" / str(match_id) / "full.html").read_text(encoding="utf-8")
     assert html.count('<section class="seg ') == 11
     assert "无显著峰值" in html
-    assert verify_sources(match_id, data_root=data_root) == []
+    assert verify_sources(match_id, kind="full", data_root=data_root) == []
     metrics = json.loads(
         json.dumps({"sections": html.count('<section class="seg ')})
     )
