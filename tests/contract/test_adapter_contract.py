@@ -68,10 +68,12 @@ def fast_reconnect(monkeypatch):
     monkeypatch.setattr("danmu_intel.collect.adapter.RECONNECT_BACKOFF_S", RECONNECT_BACKOFF)
 
 
-def _collect(adapter: Adapter, room: RoomKey, stop_after: int) -> list:
+def _collect(
+    adapter: Adapter, room: RoomKey, stop_after: int, *, on_reconnect=None
+) -> list:
     async def run() -> list:
         events = []
-        async for event in adapter.stream(room):
+        async for event in adapter.stream(room, on_reconnect=on_reconnect):
             events.append(event)
             if len(events) >= stop_after:
                 break
@@ -137,6 +139,36 @@ def test_stream_reconnects_after_disconnect(platform, data_root):
     events = _collect(adapter, room, len(frames))
     assert len(events) == len(frames), "断流后必须自动重连并继续产出事件"
     assert transport.calls >= 2, "应当至少重连一次"
+
+
+class BrokenTransport:
+    """第一次连接发到一半就断流（抛错），第二次把剩下的帧发完。"""
+
+    def __init__(self, first: list[bytes], second: list[bytes]) -> None:
+        self._batches = [first, second]
+        self.calls = 0
+
+    async def frames(self, room_id: str) -> AsyncIterator[bytes]:
+        self.calls += 1
+        batch = self._batches.pop(0)
+        for frame in batch:
+            yield frame
+        if self._batches:
+            raise ConnectionError("断流")
+
+
+def test_stream_reports_reconnect_reason(platform, data_root):
+    """重连必须把原因回调给采集器（T2 靠它累计 `reconnects` 并把会话标成 `stalled`）。"""
+    frames = _fixture_frames("danmaku")
+    half = len(frames) // 2
+    adapter: Adapter = HuyaAdapter(transport=BrokenTransport(frames[:half], frames[half:]))
+    assert platform in ADAPTERS
+    room = adapter.parse_room(SAMPLE_URLS[platform])
+
+    reasons: list[str] = []
+    events = _collect(adapter, room, len(frames), on_reconnect=reasons.append)
+    assert len(events) == len(frames), "断流后必须重连并补齐剩余事件"
+    assert reasons == ["error"], "抛错断流的原因必须是 error"
 
 
 def test_probe_returns_probe_shape(platform, monkeypatch):

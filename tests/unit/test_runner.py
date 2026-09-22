@@ -43,7 +43,8 @@ class FakeAdapter:
             raise self.probe_error
         return Probe(is_live=True, streamer="样例主播", title="标题", game="英雄联盟")
 
-    async def stream(self, room):
+    async def stream(self, room, *, on_reconnect=None):
+        self.on_reconnect = on_reconnect
         for event in self.events:
             yield event
         if self.stream_error:
@@ -52,7 +53,8 @@ class FakeAdapter:
 
 
 class EmptyAdapter(FakeAdapter):
-    async def stream(self, room):
+    async def stream(self, room, *, on_reconnect=None):
+        self.on_reconnect = on_reconnect
         await asyncio.sleep(3600)
         yield  # pragma: no cover
 

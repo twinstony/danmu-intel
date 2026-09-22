@@ -43,7 +43,12 @@ class Probe:
 
 
 class Adapter(Protocol):
-    """平台适配器契约。契约测试见 `tests/contract/test_adapter_contract.py`。"""
+    """平台适配器契约。契约测试见 `tests/contract/test_adapter_contract.py`。
+
+    `stream` 的 `on_reconnect(原因)` 是采集器用来累计 `reconnects` 并把会话标成
+    `stalled` 的接线口（原因：`silence` / `error` / `ended`）——适配器只需把它
+    转交给 `reconnecting`，不必知道上层拿它做什么。
+    """
 
     platform: str
 
@@ -51,7 +56,9 @@ class Adapter(Protocol):
 
     async def probe(self, room: RoomKey) -> Probe: ...
 
-    def stream(self, room: RoomKey) -> AsyncIterator[DanmuEvent]: ...
+    def stream(
+        self, room: RoomKey, *, on_reconnect: Callable[[str], None] | None = None
+    ) -> AsyncIterator[DanmuEvent]: ...
 
 
 def _backoff_delay(attempt: int, backoff: tuple[float, ...]) -> float:

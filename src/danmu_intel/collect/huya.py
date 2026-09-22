@@ -16,7 +16,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import AsyncIterator, Iterator
+from typing import AsyncIterator, Callable, Iterator
 
 import aiohttp
 
@@ -250,8 +250,10 @@ class HuyaAdapter:
         _, probe = parse_page(await fetch_page(room.room_id))
         return probe
 
-    async def stream(self, room: RoomKey) -> AsyncIterator[DanmuEvent]:
-        async for event in reconnecting(self._connect, room):
+    async def stream(
+        self, room: RoomKey, *, on_reconnect: Callable[[str], None] | None = None
+    ) -> AsyncIterator[DanmuEvent]:
+        async for event in reconnecting(self._connect, room, on_reconnect=on_reconnect):
             yield event
 
     async def _connect(self, room: RoomKey) -> AsyncIterator[DanmuEvent]:
