@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# 提交前凭据闸门（设计 §14.4 / NFR-S-4）：命中任何可动用资产凭据即拒绝提交。
+set -euo pipefail
+repo_root="$(git rev-parse --show-toplevel)"
+exec python3 "$repo_root/tools/check_no_secrets.py" "$repo_root"
