@@ -26,7 +26,7 @@ from danmu_intel.report.html import parse_sources
 from danmu_intel.report.interpreter import Interpreter
 from danmu_intel.report.publish import PublishResult, next_version, publish
 from danmu_intel.slice.manual import load_slices
-from danmu_intel.stats.basic import ALGO_VERSION, RawLine, compute
+from danmu_intel.stats.basic import ALGO_VERSION, RawLine, compute, select
 
 SEGMENT_QUERY = """
 SELECT seg.rel_path AS rel_path, seg.sha256 AS sha256, seg.msg_count AS msg_count,
@@ -80,7 +80,7 @@ def collect_facts(
     segments = load_segment_facts(conn, match_id)
     lines = load_lines(conn, match_id, data_root=root)
     games = tuple(
-        GameFacts(window=window, lines=tuple(lines), metrics=compute(lines, window))
+        GameFacts(window=window, lines=tuple(select(lines, window)), metrics=compute(lines, window))
         for window in load_slices(conn, match_id)
     )
     return MatchFacts(
@@ -182,7 +182,8 @@ def generate_and_publish(
         trigger_game_no=trigger_game_no,
         timing=timing,
     )
-    return publish(conn, content, data_root=facts.data_root, timing=timing)
+    seals = {segment.rel_path: segment.sha256 for segment in facts.segments}
+    return publish(conn, content, data_root=facts.data_root, timing=timing, seals=seals)
 
 
 def verify_sources(

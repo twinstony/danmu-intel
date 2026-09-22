@@ -21,8 +21,10 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
+from typing import Mapping
+
 from danmu_intel.common import paths
-from danmu_intel.common.sources import SourceRef, verify
+from danmu_intel.common.sources import SourceRef, compute_digest, file_digest, resolve
 from danmu_intel.report.assemble import ReportContent
 from danmu_intel.report.forms import ReportForm, Timing, form_of
 from danmu_intel.report.html import render_report_html
@@ -145,23 +147,48 @@ def _unique_sources(content: ReportContent) -> list[SourceRef]:
     return list(seen.values())
 
 
-def check_sources_resolvable(content: ReportContent, *, data_root: Path | None = None) -> CheckResult:
+def check_sources_resolvable(
+    content: ReportContent,
+    *,
+    data_root: Path | None = None,
+    seals: Mapping[str, str] | None = None,
+) -> CheckResult:
+    """每个来源文件存在、行范围可读，且文件与**采集时封存的 SHA256** 一致。
+
+    「封存哈希」来自 `danmu_segments`（采集会话落盘时记下的整文件摘要）。它是证据的
+    锚点：组装报告时现算的区间摘要永远等于当前文件，只有拿封存值对比才查得出
+    「原始记录被改动或追加」（AC-1 / AC-17 的溯源性守卫）。
+    """
     refs = _unique_sources(content)
-    failed = [
-        f"{ref.rel_path} 第 {ref.line_start}–{ref.line_end} 行"
-        for ref in refs
-        if not verify(ref, data_root=data_root)
-    ]
-    if failed:
+    problems: list[str] = []
+    for ref in refs:
+        path = resolve(ref, data_root=data_root)
+        if not path.exists():
+            problems.append(f"{ref.rel_path} 文件不存在")
+            continue
+        try:
+            current = compute_digest(path, ref.line_start, ref.line_end)
+        except (OSError, ValueError) as exc:
+            problems.append(f"{ref.rel_path} 第 {ref.line_start}–{ref.line_end} 行不可读（{exc}）")
+            continue
+        if current != ref.sha256:
+            problems.append(f"{ref.rel_path} 第 {ref.line_start}–{ref.line_end} 行在组装之后被改动")
+        recorded = (seals or {}).get(ref.rel_path)
+        if recorded is not None and file_digest(path) != recorded:
+            problems.append(f"{ref.rel_path} 与采集时封存的 SHA256 不一致（原始记录被改动或追加）")
+    if problems:
         return CheckResult(
             "sources_resolvable",
             "来源可解析",
             False,
-            f"{len(failed)}/{len(refs)} 项来源无法复核（文件缺失 / 行范围越界 / SHA256 不匹配）："
-            + "；".join(failed[:3]),
+            f"{len(problems)} 项来源无法复核（文件缺失 / 行范围越界 / SHA256 不匹配）："
+            + "；".join(problems[:3]),
         )
     return CheckResult(
-        "sources_resolvable", "来源可解析", True, f"{len(refs)} 项来源全部可复核（含事实层逐项）"
+        "sources_resolvable",
+        "来源可解析",
+        True,
+        f"{len(refs)} 项来源全部可复核（文件 + 行范围 + 封存 SHA256，含事实层逐项）",
     )
 
 
@@ -183,13 +210,17 @@ def check_deadline(content: ReportContent, form: ReportForm, timing: Timing | No
 
 
 def run_checks(
-    content: ReportContent, *, timing: Timing | None = None, data_root: Path | None = None
+    content: ReportContent,
+    *,
+    timing: Timing | None = None,
+    data_root: Path | None = None,
+    seals: Mapping[str, str] | None = None,
 ) -> tuple[CheckResult, ...]:
     form = form_of(content.kind)
     return (
         check_segments_complete(content, form),
         check_interpretation_present(content, form),
-        check_sources_resolvable(content, data_root=data_root),
+        check_sources_resolvable(content, data_root=data_root, seals=seals),
         check_deadline(content, form, timing),
     )
 
@@ -282,10 +313,15 @@ def publish(
     *,
     data_root: Path | None = None,
     timing: Timing | None = None,
+    seals: Mapping[str, str] | None = None,
 ) -> PublishResult:
-    """检查 → 渲染 → 落盘 → 记账。检查不过就不上线（AC-16）。"""
+    """检查 → 渲染 → 落盘 → 记账。检查不过就不上线（AC-16）。
+
+    `seals` 是「落盘文件 → 采集时封存的 SHA256」（`danmu_segments.sha256`），
+    来源检查拿它当证据锚点。
+    """
     form = form_of(content.kind)
-    checks = run_checks(content, timing=timing, data_root=data_root)
+    checks = run_checks(content, timing=timing, data_root=data_root, seals=seals)
     if timing is not None:
         timing.mark("publish_checks")
 
