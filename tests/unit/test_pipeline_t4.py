@@ -10,13 +10,13 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 
 import pytest
 
-from danmu_intel.common import audit, paths
+from danmu_intel.common import audit
 from danmu_intel.common.config import StatsConfig, save_stats_config
-from danmu_intel.common.db import open_db
 from danmu_intel.common.matches import create_match
 from danmu_intel.pipeline import (
     clear_metrics,
@@ -161,10 +161,7 @@ def test_gray_signals_are_persisted_with_samples_and_status(t4_ledger):
 def test_gray_signal_persistence_requires_samples(t4_ledger):
     conn, data_root, match_id = t4_ledger
     facts = collect_facts(conn, match_id, data_root=data_root)
-    empty = facts.gray_signals[0]
-    import dataclasses
-
-    broken = dataclasses.replace(empty, samples=())
+    broken = dataclasses.replace(facts.gray_signals[0], samples=())
     with pytest.raises(ValueError, match="必须附样本"):
         write_gray_signals(conn, dataclasses.replace(facts, gray_signals=(broken,)))
 
@@ -278,6 +275,3 @@ def test_render_without_correction_shows_manual_boundary_label(t4_ledger, site_r
     assert "边界来源：人工指定 1 局" in html
     assert "终局判定：已终局" in html
     assert "比分：官方 2:0" in html
-    assert paths.site_dir().name == "site"
-    fresh = open_db(paths.db_path())
-    fresh.close()

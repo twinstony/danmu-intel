@@ -27,7 +27,7 @@ import sys
 from datetime import datetime
 
 from danmu_intel.common import paths
-from danmu_intel.common.config import StatsConfig, load_stats_config, save_stats_config
+from danmu_intel.common.config import load_stats_config, save_stats_config
 from danmu_intel.common.db import open_db
 from danmu_intel.common.matches import create_match, get_match
 from danmu_intel.pipeline import (
@@ -40,7 +40,6 @@ from danmu_intel.pipeline import (
 )
 from danmu_intel.slice import engine, signals
 from danmu_intel.slice.manual import add_manual_slice
-from danmu_intel.stats import final as final_signals
 from danmu_intel.stats.gray import reportable
 
 logger = logging.getLogger("danmu_intel")
