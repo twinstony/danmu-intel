@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LPL iG vs LNG 情报</title>
+<style>
+:root { color-scheme: light dark; }
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; max-width: 880px; margin-inline: auto;
+  font: 16px/1.7 -apple-system, "PingFang SC", "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  color: #1a1a1a; background: #fafafa; }
+h1 { font-size: 22px; margin: 0 0 4px; }
+h2 { font-size: 18px; margin: 0 0 8px; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+p { margin: 0 0 8px; }
+.meta { color: #666; font-size: 14px; }
+.toc { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 12px 16px; margin: 16px 0; }
+.toc ol { margin: 0; padding-left: 20px; }
+.toc a { color: inherit; }
+.seg { background: #fff; border: 1px solid #e5e5e5; border-radius: 8px; padding: 16px; margin: 0 0 16px; }
+.seg--interpretation, .seg--fact-interpretation { border-left: 4px solid #b7791f; }
+.seg--fact, .seg--fact-gray { border-left: 4px solid #2c7a7b; }
+.kind { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px; }
+.kind--fact { background: #e6fffa; color: #234e52; }
+.kind--fact-gray { background: #fffaf0; color: #7b341e; }
+.kind--interpretation, .kind--fact-interpretation { background: #fefcbf; color: #744210; }
+.body p { white-space: pre-wrap; }
+details { margin-top: 12px; font-size: 13px; }
+summary { cursor: pointer; color: #2b6cb0; }
+details ul { margin: 8px 0 0; padding-left: 20px; }
+code { word-break: break-all; font-size: 12px; }
+footer { color: #666; font-size: 13px; padding: 16px 0 32px; }
+</style>
+</head>
+<body>
+<header>
+<h1>LPL iG vs LNG 情报</h1>
+<p class="meta">LPL｜iG vs LNG｜状态 live｜弹幕 56 条｜算法版本 1.0.0</p>
+<p class="meta">生成时间 2026-09-22 17:14:32｜
+本页标注「解读」的 7 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
+</header>
+<nav class="toc"><ol>
+<li><a href="#seg-0">0 比赛信息</a></li>
+<li><a href="#seg-1">1 结果总览</a></li>
+<li><a href="#seg-2">2 逐局复盘</a></li>
+<li><a href="#seg-3">3 队伍画像</a></li>
+<li><a href="#seg-4">4 人员画像</a></li>
+<li><a href="#seg-5">5 灰信号汇总</a></li>
+<li><a href="#seg-6">6 联赛规律与版本</a></li>
+<li><a href="#seg-7">7 预测验证</a></li>
+<li><a href="#seg-8">8 盘口讨论</a></li>
+<li><a href="#seg-9">9 情报含义与后续观察点</a></li>
+<li><a href="#seg-10">10 数据与溯源</a></li>
+</ol></nav>
+<main>
+<section class="seg seg--fact" id="seg-0"><h2><span>0</span> 比赛信息 <span class="kind kind--fact">事实</span></h2><div class="body"><p>比赛 #1｜LPL｜iG vs LNG｜状态 live</p>
+<p>阶段：德玛西亚杯半决赛｜计划开始：未登记</p>
+<p>官方结果：进行中</p>
+<p>取材范围：平台 huya；直播间 323444、660000；覆盖 2026-09-22 17:01:36 – 2026-09-22 17:12:36；共 56 条弹幕；比赛状态 live</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--fact" id="seg-1"><h2><span>1</span> 结果总览 <span class="kind kind--fact">事实</span></h2><div class="body"><p>官方结果：进行中（来源：人工登记；官方数据源接入见设计 §20 O8）</p>
+<p>小局切片：1 局（边界来源：人工指定）</p>
+<p>G1：2026-09-22 17:05:45 – 2026-09-22 17:12:39（边界来源：人工指定）｜弹幕 54 条｜独立发言者 36 人｜无显著峰值（所有窗口均未超过「均值+3σ」与绝对阈值）</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--fact-interpretation" id="seg-2"><h2><span>2</span> 逐局复盘 <span class="kind kind--fact-interpretation">事实 + 解读</span></h2><div class="body"><p>逐局事实：</p>
+<p>G1：2026-09-22 17:05:45 – 2026-09-22 17:12:39（边界来源：人工指定）｜弹幕 54 条｜独立发言者 36 人｜无显著峰值（所有窗口均未超过「均值+3σ」与绝对阈值）</p>
+<p>（解读，非事实）按弹幕总量看，讨论最集中的是 G1；这只说明观众注意力所在，不等于局势判断。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--interpretation" id="seg-3"><h2><span>3</span> 队伍画像 <span class="kind kind--interpretation">解读</span></h2><div class="body"><p>（解读，非事实）本报告不含任何可归属到 iG / LNG 的结构化数据，因此不对两队的实力与风格下结论。弹幕总量最高的小局是 G1（54 条），说明该局的讨论热度最高。队伍画像需要跨场累积（设计 §19 M6），单场弹幕样本不足以支撑。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--interpretation" id="seg-4"><h2><span>4</span> 人员画像 <span class="kind kind--interpretation">解读</span></h2><div class="body"><p>（解读，非事实）本系统的原始记录不落明文身份（设计 §5.2：只存加盐用户哈希），因此无法产出人员级画像，也不做任何点名。本场共有 56 条弹幕，只用于热度与去重计数，不用于评价个人。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--fact-gray" id="seg-5"><h2><span>5</span> 灰信号汇总 <span class="kind kind--fact-gray">事实（风险提示）</span></h2><div class="body"><p>本场规则统计层未产出灰信号（灰信号识别属 T4，本票未接入）。</p>
+<p>纪律（需求 §6.5）：灰信号只作风险提示，不出现指控性结论、不指名个人或队伍、必须附样本（时间 + 原文片段）、必须满足多人多时段的证据门槛；不达门槛即作废并留原因。本报告不含任何指控。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--interpretation" id="seg-6"><h2><span>6</span> 联赛规律与版本 <span class="kind kind--interpretation">解读</span></h2><div class="body"><p>（解读，非事实）单场样本不足以形成联赛规律。本场只有 1 个小局的弹幕证据，跨场规律需要历史库累积（设计 §19 M6）。本段不引入事实段之外的任何数字。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--fact-interpretation" id="seg-7"><h2><span>7</span> 预测验证 <span class="kind kind--fact-interpretation">事实 + 解读</span></h2><div class="body"><p>本场没有公开发布过的预测记录（预测台账与验证闭环属 T5），因此无可对照项。</p>
+<p>（解读，非事实）不做事后追认：没有留痕的预测不参与对错统计（需求 NFR-L-4）。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--interpretation" id="seg-8"><h2><span>8</span> 盘口讨论 <span class="kind kind--interpretation">解读</span></h2><div class="body"><p>（解读，非事实）本票未接入盘口数据源，弹幕中的盘口讨论也尚未做结构化抽取（关键词与灰信号统计属 T4）。本场 56 条弹幕里是否提及盘口，本报告不作判断——没有抽取过程就没有可信结论。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--interpretation" id="seg-9"><h2><span>9</span> 情报含义与后续观察点 <span class="kind kind--interpretation">解读</span></h2><div class="body"><p>（解读，非事实）观察点由事实段推出，不新增事实：① 回看 G1 的弹幕密度变化：无显著峰值（所有窗口均未超过「均值+3σ」与绝对阈值）；密度最高的时刻通常对应比赛的关键事件。② 本报告的数据缺口请对照第 10 段的取材范围与文件清单，缺口即证据边界。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+<section class="seg seg--fact" id="seg-10"><h2><span>10</span> 数据与溯源 <span class="kind kind--fact">事实</span></h2><div class="body"><p>算法版本：1.0.0</p>
+<p>原始记录文件：2 个；弹幕总数：56 条</p>
+<p>- raw/huya/2026-09-22/660000-17.jsonl｜2 条｜2026-09-22 17:01:36 – 2026-09-22 17:03:30｜SHA256 1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</p>
+<p>- raw/huya/2026-09-22/323444-17.jsonl｜54 条｜2026-09-22 17:05:45 – 2026-09-22 17:12:36｜SHA256 fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</p>
+<p>每个来源都可用「文件 + 行范围 + SHA256」独立复核（页面上逐项展开）。</p></div><details><summary>来源（2 项：文件 + 行范围 + SHA256）</summary><ul><li><code>raw/huya/2026-09-22/323444-17.jsonl</code> 第 1–54 行 · SHA256 <code>fcee523a7d4af06fa0024cec897279cc7b1d6d66e851fb6bf8e145b87de058f4</code></li>
+<li><code>raw/huya/2026-09-22/660000-17.jsonl</code> 第 1–2 行 · SHA256 <code>1cccad1ada4fe588e05c78e07419803084de717c77c4bfee75ef2586672a2370</code></li></ul></details></section>
+</main>
+<footer>数据来源为公开弹幕；原始记录存于仓库外数据目录，逐项可用 SHA256 复核。</footer>
+</body>
+</html>
