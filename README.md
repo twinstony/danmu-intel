@@ -6,10 +6,16 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1：采集 → 静态页最薄闭环）
+## 当前能力（T1+T2）
 
-虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
-规则直出**十一段**静态页。不含 LLM、付费墙、公网发布、多平台、后台。
+**T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
+规则直出**十一段**静态页。
+
+**T2**：同场比赛**多直播间并发采集**（一房间一子进程）+ 采集监督：心跳 5 秒、无消息
+60 秒重连、无首条消息 120 秒 `no_stream`、进程被杀/僵死自动拉起（退避 1s→60s，
+30 分钟内重启超 5 次停止重试并留因）、磁盘可用 < 5GB 报警、每房间贡献量可查。
+
+不含 LLM、付费墙、公网发布、多平台、后台（见设计 §19 实施分层）。
 
 ## 安装
 
@@ -28,6 +34,12 @@ danmu-intel match add --league LPL --team-a iG --team-b LNG --state ended \
 # ② 采集真实弹幕（seconds 省略则持续采集到 Ctrl-C）
 danmu-intel collect --url https://www.huya.com/660000 --seconds 300 --match-id 1
 
+# ②' 多房间并发采集 + 监督（一房间一子进程；seconds 省略则跑到所有房间停下）
+danmu-intel supervise --match-id 1 --seconds 1800 \
+  --room https://www.huya.com/660000 \
+  --room https://www.huya.com/323444 \
+  --room https://www.huya.com/11342412
+
 # ③ 人工指定这一局的起止（毫秒时间戳，可从落盘记录里取）
 danmu-intel slice --match-id 1 --game-no 1 --start-ms 1790064000123 --end-ms 1790064300123
 
@@ -41,12 +53,31 @@ danmu-intel rebuild        --match-id 1  # AC-13：删统计后重算，结果�
 python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资产凭据
 ```
 
+### 采集状态怎么看（T2）
+
+```bash
+danmu-intel health       --match-id 1   # 每房间：状态/PID/最后一条消息/重连/重启/严重级别/最近异常
+danmu-intel contribution --match-id 1   # 每房间贡献量：条数 / 时间跨度 / 去重后条数（AC-15）
+danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通道投递）
+```
+
+- 一房间一子进程；主进程只调度（不碰网络），5 秒轮询一次。
+- 子进程每 5 秒写心跳（库里的 `room_sessions` 行 + `runtime/heartbeat/<平台>-<房间>.json`）。
+- 进程退出/僵死 → 退避 1s→2s→…→60s 重拉；**同一房间 30 分钟内重启超过 5 次**则停止重试
+  并以非零退出码结束，停止原因写进事件库（`danmu-intel events` 可查）。
+- 断流 60 秒触发重连（累计 `reconnects`）；120 秒没有首条消息判 `no_stream`（不退出，
+  房间可能只是还没开播）；数据盘可用 < 5GB 产生 `disk_low`（不静默）。
+- **AC-15 的 30 分钟真实验收**：上面 `supervise` 那条命令跑满 `--seconds 1800`（建议选
+  三个确实在解说同一场比赛的直播间），然后用 `health`/`contribution` 逐房间核对条数、
+  时间跨度与去重后条数——三房间互不为子集，合计不等于任一房间的条数。
+
 ## 数据落点
 
 | 内容 | 位置 | 进 git 吗 |
 |---|---|---|
 | 原始弹幕 JSONL | `~/danmu-intel-data/raw/<platform>/<yyyy-mm-dd>/<room_id>-<hh>.jsonl` | 否 |
 | SQLite | `~/danmu-intel-data/db.sqlite3`（WAL） | 否 |
+| 心跳文件 | `~/danmu-intel-data/runtime/heartbeat/<platform>-<room_id>.json` | 否 |
 | 用户哈希盐值 | `~/danmu-intel-data/salt`（0600） | 否 |
 | 站点产物 | `site/matches/<match_id>.html` | 是 |
 
@@ -65,6 +96,10 @@ pytest          # 覆盖率门禁 90%；全程不连外网（平台数据用录�
 平台数据的回放 fixture 由 `tools/record_fixtures.py` 生成：先 `record` 连真实
 直播间录原始帧，再 `sanitize` 把身份与原文替换成样例值后写入
 `tests/fixtures/huya/frames.jsonl`（录制帧文件本身不进仓库）。
+
+采集监督的测试缝在 `tests/unit/test_supervisor.py`（假时钟 + 假子进程 + 真心跳）；
+`tests/e2e/test_supervisor_processes.py` 另外用**真进程**跑三个房间，验证
+「不重不漏」与「kill 后 10 秒内拉起」，子进程仍是录制帧回放（`tests/e2e/replay_child.py`）。
 
 ## 边界
 

@@ -1,13 +1,20 @@
 """采集会话：把适配器事件流落到 append-only JSONL，并写库（设计 §5/§7）。
 
-T1 是**单房间、前台进程**的最薄版本：一条命令跑完一段时间即退出，退出时把
-本次涉及的文件封存（SHA256 + 条数 + 首末时间）写入 `danmu_segments`。
-断流由 `adapter.reconnecting` 负责；进程级监督、心跳与重启上限属于 T2。
+**一个房间一个进程**：本模块就是那个子进程（`danmu-intel collect`）。它做三件事：
+
+1. 落盘（append-only JSONL）+ 封存（`danmu_segments`）；
+2. 每 5 秒写心跳（`room_sessions` 行 + `runtime/heartbeat/<platform>-<room>.json`），
+   状态在 `connecting → running → stalled/no_stream → exited` 之间走；
+3. 异常不静默（`collect/incidents.py`）：`no_stream` / `stalled` / `disk_low`。
+
+进程级监督（一房间一子进程、重启退避、重启上限）在 `collect/supervisor.py`；
+它把「第几次重启 + 已累计重连数」用环境变量接力给本进程。
 """
 
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hashlib
 import logging
 import os
@@ -15,9 +22,27 @@ import sqlite3
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import AsyncIterator
+from typing import AsyncIterator, Iterable
 
+from danmu_intel.collect import adapter as stream_layer
 from danmu_intel.collect.adapter import Adapter, Probe, RoomKey
+from danmu_intel.collect.heartbeat import (
+    DISK_FREE_MIN_BYTES,
+    HEARTBEAT_INTERVAL_S,
+    Heartbeat,
+    Supervision,
+    disk_low,
+    free_bytes,
+    supervision_state,
+    write_heartbeat,
+)
+from danmu_intel.collect.incidents import (
+    DISK_LOW,
+    NO_STREAM,
+    STALLED,
+    SessionIncidents,
+    worst,
+)
 from danmu_intel.common import db as db_module
 from danmu_intel.common import paths
 from danmu_intel.common.events import DanmuEvent, JsonlAppender, iter_events
@@ -25,6 +50,7 @@ from danmu_intel.common.events import DanmuEvent, JsonlAppender, iter_events
 logger = logging.getLogger(__name__)
 
 DISCOVERED_BY_MANUAL = "manual"  # T1 只支持人工登记（FR-C1-3 第一优先级）
+NO_FIRST_MSG_S = 120.0  # 无首条消息即判 `no_stream`（设计 §7.3）
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,6 +69,9 @@ class SessionResult:
     msg_count: int
     segments: list[SealedSegment] = field(default_factory=list)
     probe: Probe | None = None
+    state: str = "exited"
+    reconnects: int = 0
+    incidents: list[str] = field(default_factory=list)
 
 
 def now_ms() -> int:
@@ -106,6 +135,31 @@ def seal_segment(
     return SealedSegment(rel_path, count, digest, first_ts, last_ts)
 
 
+def seal_pending_files(
+    conn: sqlite3.Connection,
+    session_id: int,
+    room: RoomKey,
+    *,
+    data_root: Path | None = None,
+    moments: Iterable[int],
+) -> list[SealedSegment]:
+    """把该房间「已落盘但还没进库」的文件封存（子进程被 kill 时的兜底）。
+
+    子进程被 SIGKILL 时来不及封存自己写的文件；若不补封，那一小时的消息就存在但
+    不在索引里，统计与贡献量都会漏。候选文件由传入的时刻算出（心跳里的最后一条
+    消息 + 当前时刻，跨小时轮转也盖得住），不存在的直接跳过。
+    """
+    root = data_root or paths.data_dir()
+    candidates: dict[Path, None] = {}
+    for moment in moments:
+        candidates[paths.raw_path(room.platform, room.room_id, moment, data_root=root)] = None
+    sealed: list[SealedSegment] = []
+    for path in candidates:
+        if path.exists() and path.stat().st_size:
+            sealed.append(seal_segment(conn, session_id, path, data_root=root))
+    return sealed
+
+
 async def _until_deadline(source: AsyncIterator[DanmuEvent], seconds: float | None) -> AsyncIterator[DanmuEvent]:
     """按秒数截断无限事件流；没有新弹幕时也要能按时收工。"""
     iterator = source.__aiter__()
@@ -126,6 +180,155 @@ async def _until_deadline(source: AsyncIterator[DanmuEvent], seconds: float | No
             await aclose()
 
 
+@dataclass
+class SessionStats:
+    """会话的实时状态（心跳每 5 秒把它写进库与心跳文件）。"""
+
+    state: str = "connecting"
+    msg_count: int = 0
+    last_msg_at: int | None = None
+    reconnects: int = 0
+    severity: str = "info"
+
+
+class SessionRuntime:
+    """子进程侧的会话运行时：心跳发布、状态判定、异常事件出口。
+
+    状态机（设计 §7.3）：`connecting` → 首条弹幕 → `running`；60 秒无消息由
+    `adapter.reconnecting` 触发重连，回调把状态标成 `stalled`；120 秒没有首条
+    消息则标成 `no_stream`（事件照报，进程不退——房间可能只是还没开播）。
+    """
+
+    def __init__(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        session_id: int,
+        room: RoomKey,
+        match_id: int | None,
+        data_root: Path,
+        counts: Supervision | None = None,
+        started_at: int | None = None,
+        interval: float | None = None,
+        incidents: SessionIncidents | None = None,
+    ) -> None:
+        self.conn = conn
+        self.session_id = session_id
+        self.room = room
+        self.match_id = match_id
+        self.data_root = data_root
+        self.counts = counts or Supervision()
+        self.started_at = started_at if started_at is not None else now_ms()
+        self.interval = HEARTBEAT_INTERVAL_S if interval is None else interval
+        self.stats = SessionStats(reconnects=self.counts.reconnects)
+        self.incidents = incidents or SessionIncidents(
+            conn, platform=room.platform, room_id=room.room_id, match_id=match_id
+        )
+        self.reported: list[str] = []
+
+    # —— 流层事件的入口 ——
+
+    def note_message(self, event: DanmuEvent) -> None:
+        self.stats.msg_count += 1
+        self.stats.last_msg_at = event.ts
+        self.stats.state = "running"
+
+    def note_reconnect(self, reason: str) -> None:
+        """重连回调：累计 `reconnects`、标 `stalled`，静默断流立即报事件。"""
+        self.stats.reconnects += 1
+        self.stats.state = "stalled"
+        if reason == "silence":
+            # 报的是流层实际用的静默阈值（它读模块常量，测试里会被压小）
+            self._report(STALLED, "warning", {"silence_s": stream_layer.SILENCE_TIMEOUT_S})
+        self.publish()
+
+    # —— 周期性检查 ——
+
+    def check_first_message(self, timestamp: int | None = None) -> bool:
+        """120 秒仍无首条消息 → `no_stream`（不静默）。"""
+        moment = timestamp if timestamp is not None else now_ms()
+        if self.stats.msg_count or self.stats.state == "no_stream":
+            return False
+        if moment - self.started_at < NO_FIRST_MSG_S * 1000:
+            return False
+        self.stats.state = "no_stream"
+        self._report(NO_STREAM, "warning", {"wait_s": NO_FIRST_MSG_S})
+        return True
+
+    def check_disk(self) -> bool:
+        """数据盘可用空间低于下限 → `disk_low`（不静默）。"""
+        if not disk_low(self.data_root):
+            return False
+        self._report(
+            DISK_LOW,
+            "critical",
+            {"free_bytes": free_bytes(self.data_root), "minimum_bytes": DISK_FREE_MIN_BYTES},
+        )
+        return True
+
+    def _report(self, kind: str, severity: str, detail: dict[str, object]) -> None:
+        self.stats.severity = worst(self.stats.severity, severity)
+        if self.incidents.emit_once(kind, severity=severity, detail=detail):
+            self.reported.append(kind)
+
+    # —— 心跳发布 ——
+
+    def publish(self) -> None:
+        """写 `room_sessions` 行 + 心跳文件（心跳文件给 supervisor 判活）。"""
+        self.conn.execute(
+            "UPDATE room_sessions SET state=?, last_msg_at=?, reconnects=?, severity=? WHERE id=?",
+            (
+                self.stats.state,
+                self.stats.last_msg_at,
+                self.stats.reconnects,
+                self.stats.severity,
+                self.session_id,
+            ),
+        )
+        self.conn.commit()
+        write_heartbeat(
+            Heartbeat(
+                pid=os.getpid(),
+                session_id=self.session_id,
+                platform=self.room.platform,
+                room_id=self.room.room_id,
+                state=self.stats.state,
+                started_at=self.started_at,
+                last_msg_at=self.stats.last_msg_at,
+                msg_count=self.stats.msg_count,
+                reconnects=self.stats.reconnects,
+                restart_count=self.counts.restart_count,
+                written_at=now_ms(),
+            ),
+            data_root=self.data_root,
+        )
+
+    async def run(self) -> None:
+        """心跳循环：每 `interval` 秒检查一次并写心跳。"""
+        while True:
+            await asyncio.sleep(self.interval)
+            self.check_first_message()
+            self.check_disk()
+            self.publish()
+
+    def finish(self, state: str) -> None:
+        """收工：落下最终状态（含 `exited`）并再发一次心跳。"""
+        self.stats.state = state
+        self.conn.execute(
+            "UPDATE room_sessions SET ended_at=?, state=?, last_msg_at=?, reconnects=?, severity=? WHERE id=?",
+            (
+                now_ms(),
+                state,
+                self.stats.last_msg_at,
+                self.stats.reconnects,
+                self.stats.severity,
+                self.session_id,
+            ),
+        )
+        self.conn.commit()
+        self.publish()
+
+
 async def run_session(
     room: RoomKey,
     *,
@@ -134,6 +337,7 @@ async def run_session(
     seconds: float | None = None,
     conn: sqlite3.Connection | None = None,
     data_root: Path | None = None,
+    heartbeat_interval: float | None = None,
 ) -> SessionResult:
     """采集一个房间：`seconds=None` 表示一直采到进程被停止。"""
     from danmu_intel.collect import get_adapter
@@ -143,56 +347,88 @@ async def run_session(
     own_conn = conn is None
     conn = conn or db_module.open_db(root / "db.sqlite3")
     try:
-        try:
-            probe: Probe | None = await adapter.probe(room)
-        except Exception as exc:  # 探测失败不影响采集（页面协议变更不得导致停采）
-            logger.warning("【%s/%s】房间探测失败：%s", room.platform, room.room_id, exc)
-            probe = None
-        room_row_id = upsert_room(conn, room, probe)
+        # 先立房间/会话/心跳，再探测：探测最多能耗掉 15 秒 HTTP 超时，心跳晚亮 15 秒会让
+        # 「进程是否活着」这一步失去意义（supervisor 与运维都靠心跳）
+        room_row_id = upsert_room(conn, room, None)
+        counts = supervision_state()
         session_id = int(
             conn.execute(
                 """
-                INSERT INTO room_sessions(room_id, match_id, pid, started_at, state, last_msg_at)
-                VALUES(?, ?, ?, ?, 'running', ?)
+                INSERT INTO room_sessions(room_id, match_id, pid, started_at, state, restart_count,
+                                         reconnects, severity, last_msg_at)
+                VALUES(?, ?, ?, ?, 'connecting', ?, ?, 'info', ?)
                 """,
-                (room_row_id, match_id, os.getpid(), now_ms(), None),
+                (
+                    room_row_id,
+                    match_id,
+                    os.getpid(),
+                    now_ms(),
+                    counts.restart_count,
+                    counts.reconnects,
+                    None,
+                ),
             ).lastrowid
         )
         conn.commit()
 
+        runtime = SessionRuntime(
+            conn,
+            session_id=session_id,
+            room=room,
+            match_id=match_id,
+            data_root=root,
+            counts=counts,
+            interval=heartbeat_interval,
+        )
+        runtime.publish()  # 先亮心跳：supervisor 一启动就能看见这个房间活着
+        heartbeat = asyncio.create_task(runtime.run())
+
+        try:
+            probe: Probe | None = await adapter.probe(room)
+        except Exception as exc:  # 探测失败不影响采集（页面协议变更不得导致停采）
+            logger.warning(
+                "【%s/%s】房间探测失败（%s）：%s", room.platform, room.room_id, type(exc).__name__, exc
+            )
+            probe = None
+        if probe is not None:
+            upsert_room(conn, room, probe)  # 主播名/开播状态是探测才知道的，补上
+
         touched: dict[Path, JsonlAppender] = {}
         count = 0
-        last_ts: int | None = None
         state = "exited"
         try:
-            async for event in _until_deadline(adapter.stream(room), seconds):
+            async for event in _until_deadline(
+                adapter.stream(room, on_reconnect=runtime.note_reconnect), seconds
+            ):
                 event = event.with_match(match_id)
-                path = paths.raw_path(event.platform, event.room_id, event.ts)
+                path = paths.raw_path(event.platform, event.room_id, event.ts, data_root=root)
                 appender = touched.get(path)
                 if appender is None:
                     appender = JsonlAppender(path)
                     touched[path] = appender
                 appender.append(event)
                 count += 1
-                last_ts = event.ts
+                runtime.note_message(event)
         except Exception:
             state = "stalled"
             raise
         finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
             for appender in touched.values():
                 appender.close()
             segments = [seal_segment(conn, session_id, path, data_root=root) for path in touched]
-            conn.execute(
-                "UPDATE room_sessions SET ended_at=?, state=?, last_msg_at=? WHERE id=?",
-                (now_ms(), state, last_ts, session_id),
-            )
-            conn.commit()
+            runtime.finish(state)
         return SessionResult(
             session_id=session_id,
             room_row_id=room_row_id,
             msg_count=count,
             segments=segments,
             probe=probe,
+            state=state,
+            reconnects=runtime.stats.reconnects,
+            incidents=list(runtime.reported),
         )
     finally:
         if own_conn:

@@ -10,17 +10,22 @@
 - `ts`：毫秒（epoch）。
 - `user_hash`：平台用户 ID 的加盐哈希，**不落明文身份**。
 - 写入用 `O_APPEND`，只增不改。
+
+同场多房间聚合的去重键 `(platform, room_id, msg_hash)` 也在这里给（纯函数，见
+`message_key` / `dedupe`）：键里带 `room_id` 意味着**不同房间的同文弹幕各算一条**。
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Iterable, Iterator
 
 JSONL_FIELDS = ("ts", "platform", "room_id", "match_id", "user_hash", "text", "extra")
+MSG_HASH_LENGTH = 32
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +73,34 @@ class DanmuEvent:
             extra=extra,
             match_id=match_id,
         )
+
+
+def msg_hash(event: DanmuEvent) -> str:
+    """一条记录的消息指纹（`msg_hash`）。
+
+    平台不提供全局消息 id，所以指纹取自**落盘记录的稳定字段**
+    `ts|user_hash|text`（平台与房间在去重键里另算）。同一条记录被重复落盘
+    （重连补写、同一文件被读两遍），指纹相同，因此只算一条。
+    """
+    payload = f"{event.ts}|{event.user_hash}|{event.text}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:MSG_HASH_LENGTH]
+
+
+def message_key(event: DanmuEvent) -> tuple[str, str, str]:
+    """跨房间去重键 `(platform, room_id, msg_hash)`（设计 §7.2；AC-15）。"""
+    return (event.platform, event.room_id, msg_hash(event))
+
+
+def dedupe(events: Iterable[DanmuEvent]) -> list[DanmuEvent]:
+    """按去重键折叠重复记录，保留首次出现的顺序（纯函数，无 I/O、无时钟）。"""
+    seen: set[tuple[str, str, str]] = set()
+    kept: list[DanmuEvent] = []
+    for event in events:
+        key = message_key(event)
+        if key not in seen:
+            seen.add(key)
+            kept.append(event)
+    return kept
 
 
 def decode_line(line: str) -> DanmuEvent:

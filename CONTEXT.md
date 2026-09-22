@@ -33,6 +33,11 @@
 | 适配器 | 平台特定采集逻辑（解析/流/探测），统一实现 `Adapter` 协议 |
 | 用户哈希 | 平台用户 ID 的加盐哈希（`user_hash`），原始记录只存它，不落明文身份 |
 | 房间会话 | 一次采集会话（进程级），含 PID、心跳、状态 |
+| 采集监督 | 一房间一子进程的启动/监控/重拉机制（`supervisor`），含退避与重启上限 |
+| 心跳 | 子进程每 5 秒原子写的存活证据（库内 `room_sessions` 行 + `runtime/heartbeat/<platform>-<room_id>.json`） |
+| 异常事件 | 采集异常产生的待投递事件（`incident` → `notifications(state='pending')`），投递归 T11 |
+| 消息指纹 | 一条原始记录的内容指纹（`msg_hash` = `ts\|user_hash\|text`），去重键 `(platform, room_id, msg_hash)` |
+| 贡献量 | 一个直播间对某场比赛的落盘条数 / 时间跨度 / 去重后条数（`contribution`） |
 | 段 | 报告的十一分之一，固定编号 0–10，带 `kind` 标记 |
 | 来源引用 | 报告中每项事实对应的落盘文件 + **行范围** + SHA256（`SourceRef`） |
 | 算法版本 | 规则统计的算法标识（`algo_version`），变更即递增，重算写新行不覆盖旧行 |

@@ -43,7 +43,8 @@ class FakeAdapter:
             raise self.probe_error
         return Probe(is_live=True, streamer="样例主播", title="标题", game="英雄联盟")
 
-    async def stream(self, room):
+    async def stream(self, room, *, on_reconnect=None):
+        self.on_reconnect = on_reconnect
         for event in self.events:
             yield event
         if self.stream_error:
@@ -52,7 +53,8 @@ class FakeAdapter:
 
 
 class EmptyAdapter(FakeAdapter):
-    async def stream(self, room):
+    async def stream(self, room, *, on_reconnect=None):
+        self.on_reconnect = on_reconnect
         await asyncio.sleep(3600)
         yield  # pragma: no cover
 
@@ -79,7 +81,7 @@ def test_run_session_writes_contract_jsonl_and_indexes(data_root):
     events = make_events(5, BASE_TS)
     with session_conn() as session_db:
         result = asyncio.run(
-            run_session(ROOM, adapter=FakeAdapter(events), seconds=30, match_id=7, conn=session_db)
+            run_session(ROOM, adapter=FakeAdapter(events), seconds=0.5, match_id=7, conn=session_db)
         )
     assert result.msg_count == 5
     assert len(result.segments) == 1
@@ -119,7 +121,7 @@ def test_run_session_writes_contract_jsonl_and_indexes(data_root):
 def test_run_session_rolls_over_hourly_files(data_root):
     events = make_events(4, BASE_TS) + make_events(4, BASE_TS + HOUR)
     with session_conn() as session_db:
-        result = asyncio.run(run_session(ROOM, adapter=FakeAdapter(events), seconds=30, conn=session_db))
+        result = asyncio.run(run_session(ROOM, adapter=FakeAdapter(events), seconds=0.5, conn=session_db))
     assert result.msg_count == 8
     assert len(result.segments) == 2
     assert {segment.rel_path.split("/")[-1] for segment in result.segments} == {"660000-16.jsonl", "660000-17.jsonl"}
@@ -132,7 +134,7 @@ def test_run_session_tolerates_probe_failure(data_root):
             run_session(
                 ROOM,
                 adapter=FakeAdapter(events, probe_error=RuntimeError("页面变了")),
-                seconds=10,
+                seconds=0.5,
                 conn=session_db,
             )
         )
@@ -170,8 +172,8 @@ def test_run_session_reuses_room_row(data_root):
     conn = open_db(paths.db_path())
     try:
         adapter = FakeAdapter(make_events(1, BASE_TS))
-        asyncio.run(run_session(ROOM, adapter=adapter, seconds=5, conn=conn))
-        asyncio.run(run_session(ROOM, adapter=adapter, seconds=5, conn=conn))
+        asyncio.run(run_session(ROOM, adapter=adapter, seconds=0.5, conn=conn))
+        asyncio.run(run_session(ROOM, adapter=adapter, seconds=0.5, conn=conn))
         assert conn.execute("SELECT COUNT(*) AS n FROM rooms").fetchone()["n"] == 1
         assert conn.execute("SELECT COUNT(*) AS n FROM room_sessions").fetchone()["n"] == 2
     finally:
