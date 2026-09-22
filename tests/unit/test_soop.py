@@ -137,7 +137,15 @@ def test_decode_message_rejects_body_without_separators():
 
 @pytest.mark.parametrize(
     "broken",
-    [b"", b"\x00", b"\x1d", b"\x1d\t", b"\xff" * 8, HEAD_PREFIX + b"0005" + b"\xff" * 60, b"\x1d\t0005" + b"a" * 60],
+    [
+        b"",
+        b"\x00",
+        b"\x1d",
+        b"\x1d\t",
+        b"\xff" * 8,
+        HEAD_PREFIX + b"0005" + b"\xff" * 60,
+        b"\x1d\t0005" + b"a" * 60,
+    ],
 )
 def test_decode_message_never_crashes_on_garbage(broken):
     assert decode_message(broken) == []
