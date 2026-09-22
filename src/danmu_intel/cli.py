@@ -389,13 +389,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     report = sub.add_parser("report", help="生成并发布一份报告（三形态）")
     report.add_argument("--match-id", type=int, required=True)
-    report.add_argument("--kind", required=True, help="live_brief（赛中快报）| full（完整版）| review（复盘版）")
+    report.add_argument(
+        "--kind", required=True, help="live_brief（赛中快报）| full（完整版）| review（复盘版）"
+    )
     report.add_argument(
         "--completed-game",
         type=int,
         action="append",
         metavar="N",
-        help="已完成节点（小局）的局号，可重复；缺省即全部已登记的小局（赛中快报只发布已完成节点）",
+        help="已完成节点（小局）的局号，可重复；赛中快报必须给，赛后形态缺省即全部已登记的小局",
     )
     report.add_argument("--trigger-game", type=int, default=None, help="触发本次发布的节点（小局）局号")
     report.set_defaults(func=_cmd_report)

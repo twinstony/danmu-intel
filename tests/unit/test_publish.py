@@ -67,6 +67,16 @@ def test_injected_llm_text_is_published_and_marked(ledger, site_root):
     assert "假 LLM 的固定解读文本" in result.path.read_text(encoding="utf-8")
 
 
+def test_live_brief_requires_explicit_completed_nodes(ledger):
+    """进行中的那一局不得被当成已完成的发：快报不声明完成节点就直接报错。"""
+    with pytest.raises(ValueError, match="必须声明已完成节点"):
+        generate_and_publish(ledger.conn, ledger.match_id, kind="live_brief",
+                             data_root=ledger.data_root)
+    # 赛后形态不需要声明（覆盖全部已登记的小局）
+    assert generate_and_publish(ledger.conn, ledger.match_id, kind="full",
+                                data_root=ledger.data_root).version == 1
+
+
 def test_default_interpreter_is_rule_fallback(ledger, site_root):
     result = generate_and_publish(
         ledger.conn, ledger.match_id, kind="full", data_root=ledger.data_root, generated_at=GENERATED_AT
@@ -146,6 +156,7 @@ def test_late_report_is_recorded_but_not_blocked(ledger, site_root):
         ledger.conn,
         ledger.match_id,
         kind="live_brief",
+        completed_games=(1,),
         data_root=ledger.data_root,
         generated_at=GENERATED_AT,
         clock=slow_clock,

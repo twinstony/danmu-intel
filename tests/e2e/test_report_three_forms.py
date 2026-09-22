@@ -228,6 +228,12 @@ def test_cli_publishes_three_forms_and_lists_versions(three_game_ledger, site_ro
         assert "全部来源校验通过" in capsys.readouterr().out
 
 
+def test_cli_refuses_a_live_brief_without_completed_nodes(three_game_ledger, capsys):
+    match_id = three_game_ledger.match_id
+    assert main(["report", "--match-id", str(match_id), "--kind", "live_brief"]) == 2
+    assert "必须声明已完成节点" in capsys.readouterr().err
+
+
 def test_cli_refuses_to_publish_when_evidence_changed(three_game_ledger, site_root, capsys):
     match_id = three_game_ledger.match_id
     assert main(["report", "--match-id", str(match_id), "--kind", "full"]) == 0

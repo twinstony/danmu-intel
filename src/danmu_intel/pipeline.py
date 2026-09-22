@@ -21,7 +21,7 @@ from danmu_intel.common.matches import get_match
 from danmu_intel.common.sources import SourceRef, verify
 from danmu_intel.report.assemble import build_content
 from danmu_intel.report.facts import GameFacts, MatchFacts, SegmentFacts, scope_facts
-from danmu_intel.report.forms import ReportScope, Timing, form_of
+from danmu_intel.report.forms import KIND_LIVE_BRIEF, ReportScope, Timing, form_of
 from danmu_intel.report.html import parse_sources
 from danmu_intel.report.interpreter import Interpreter
 from danmu_intel.report.publish import PublishResult, next_version, publish
@@ -163,10 +163,16 @@ def generate_and_publish(
 ) -> PublishResult:
     """报告三形态的统一入口：取材 → 组装 → 检查 → 发布（版本递增）。
 
-    `completed_games` 是本次发布覆盖的节点（小局）：赛中快报只发布已完成节点
-    （缺省即全部已登记的小局）；赛后形态不传。时限按形态的 `deadline_ms` 对齐。
+    `completed_games` 是本次发布覆盖的节点（小局）。赛中快报**必须**显式声明：正在打的那一局
+    不能当已完成的发（进行中的节点既没有完整事实，也不该出现在快报里）。赛后形态不传即
+    覆盖全部已登记的小局。时限按形态的 `deadline_ms` 对齐。
     """
     form = form_of(kind)
+    if form.kind == KIND_LIVE_BRIEF and completed_games is None:
+        raise ValueError(
+            "赛中快报必须声明已完成节点（completed_games / --completed-game N，可重复）："
+            "进行中的节点不得进快报"
+        )
     timing = Timing(clock=clock)
     facts = scope_facts(
         collect_facts(conn, match_id, data_root=data_root),
