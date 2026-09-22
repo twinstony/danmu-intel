@@ -774,7 +774,7 @@ class Adapter(Protocol):
 
 按 `to-tickets` 规则拆成 **tracer-bullet 垂直切片**（每片横穿各层、可独立验收、单 context window 装得下），发布于 GitHub issue，并用 **GitHub 原生 issue 依赖**设置阻断边（`gh api --method POST repos/twinstony/danmu-intel/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`）。
 
-当前**全部 7 张票标 `ready-for-human`** —— 被阻断的票因此不会被流水线捡起；T1 经用户 review 后可翻 `ready-for-agent`。需求 #2 与设计 #3 保持 OPEN、未作修改（to-tickets 明文规定不得关闭或修改父 issue）。
+用户已 review 设计（#3）与 T1（#4）：**T1 已翻 `ready-for-agent`**（唯一 frontier，可开工）；其余 6 张保持 `ready-for-human` —— 被阻断的票因此不会被流水线提前捡起，需用户逐张 review 后再翻。需求 #2 与设计 #3 保持 OPEN、未作修改（to-tickets 明文规定不得关闭或修改父 issue）。
 
 ### 第一波 ·「采集→发布」闭环
 
