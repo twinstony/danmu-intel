@@ -66,7 +66,7 @@ def _peak_phrase(game: GameFacts) -> str:
     top = game.metrics.get("peak") or {}
     if not top:
         return "无显著峰值（所有窗口均未超过「均值+3σ」与绝对阈值）"
-    method = "均值+3σ" if top.get("method") == "mean+3sigma" else "绝对阈值"
+    method = "均值加三倍标准差" if top.get("method") == "mean+3sigma" else "绝对阈值"
     return (
         f"峰值窗口 {format_ts(int(top['t_start']))}（窗口内 {top['count']} 条，"
         f"判定依据：{method}，阈值 {top['threshold']}）"
@@ -267,13 +267,13 @@ def _team_profile(facts: MatchFacts) -> str:
     return (
         f"本报告不含任何可归属到 {match.team_a} / {match.team_b} 的结构化数据，"
         f"因此不对两队的实力与风格下结论。{detail}"
-        "队伍画像需要跨场累积（设计 §19 M6），单场弹幕样本不足以支撑。"
+        "队伍画像需要跨场累积，单场弹幕样本不足以支撑。"
     )
 
 
 def _player_profile(facts: MatchFacts) -> str:
     return (
-        "本系统的原始记录不落明文身份（设计 §5.2：只存加盐用户哈希），"
+        "本系统的原始记录不落明文身份（只存加盐用户哈希，不落账号明文），"
         "因此无法产出人员级画像，也不做任何点名。"
         f"本报告覆盖的 {len(facts.all_lines)} 条弹幕只用于热度与去重计数，不用于评价个人。"
     )
@@ -282,17 +282,17 @@ def _player_profile(facts: MatchFacts) -> str:
 def _league_patterns(facts: MatchFacts) -> str:
     return (
         f"单场样本不足以形成联赛规律。本报告只有 {len(facts.games)} 个小局的弹幕证据，"
-        "跨场规律需要历史库累积（设计 §19 M6）。本段不引入事实段之外的任何数字。"
+        "跨场规律需要历史库累积。本段不引入事实段之外的任何数字。"
     )
 
 
 def _prediction_reading(facts: MatchFacts) -> str:
-    return "不做事后追认：没有留痕的预测不参与对错统计（需求 NFR-L-4）。"
+    return "不做事后追认：没有留痕的预测不参与对错统计。"
 
 
 def _market_talk(facts: MatchFacts) -> str:
     return (
-        "本报告未接入盘口数据源，弹幕中的盘口讨论也没有做结构化抽取（关键词聚集见第 5 段，"
+        "本报告未接入盘口数据源，弹幕中的盘口讨论也没有做结构化抽取（关键词聚集见灰信号段，"
         "但那只到「讨论聚集」为止，不构成任何盘口判断）。"
         f"本报告覆盖的 {len(facts.all_lines)} 条弹幕里是否提及盘口，本报告不作判断——"
         "没有抽取过程就没有可信结论。"
@@ -310,7 +310,7 @@ def _outlook(facts: MatchFacts) -> str:
         )
     return (
         f"观察点由事实段推出，不新增事实：{points}"
-        "② 本报告的数据缺口请对照第 10 段的取材范围与文件清单，缺口即证据边界。"
+        "② 本报告的数据缺口请对照溯源段的取材范围与文件清单，缺口即证据边界。"
     )
 
 

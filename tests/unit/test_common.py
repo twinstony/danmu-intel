@@ -143,6 +143,7 @@ def test_db_creates_all_tables(data_root):
             "config",
             "danmu_segments",
             "gray_signals",
+            "llm_calls",
             "matches",
             "metrics",
             "notifications",
