@@ -65,7 +65,7 @@ def sources_for(no: int, facts: MatchFacts) -> tuple[SourceRef, ...]:
 def _peak_phrase(game: GameFacts) -> str:
     top = game.metrics.get("peak") or {}
     if not top:
-        return "无显著峰值（所有窗口均未超过「均值+3σ」与绝对阈值）"
+        return "无显著峰值（所有窗口都未超过判定阈值：均值加三倍标准差与绝对阈值）"
     method = "均值加三倍标准差" if top.get("method") == "mean+3sigma" else "绝对阈值"
     return (
         f"峰值窗口 {format_ts(int(top['t_start']))}（窗口内 {top['count']} 条，"

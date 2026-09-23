@@ -61,6 +61,18 @@ def test_rule_fallback_texts_pass_the_same_check(facts):
         assert verify_text(text, facts) == (), f"第 {no} 段的规则直出文本引入了新事实"
 
 
+def test_rule_fallback_texts_pass_the_check_without_any_peak(facts):
+    """没有峰值那条分支也要能过校验（"均值+3σ"这种写法会带出事实层外的数字）。"""
+    from dataclasses import replace
+
+    no_peak = replace(
+        facts, games=tuple(replace(game, metrics={**game.metrics, "peak": {}}) for game in facts.games)
+    )
+    for no in INTERPRETATION_SEGMENTS:
+        text = interpretation_text(no, no_peak)
+        assert verify_text(text, no_peak) == (), f"第 {no} 段的规则直出文本引入了新事实"
+
+
 def test_a_fabricated_score_is_refused(facts):
     violations = verify_text("官方结果应是 3:0，iG 轻松取胜。", facts)
     assert kinds(violations) == {VIOLATION_SCORE}
