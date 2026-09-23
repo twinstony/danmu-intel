@@ -10,7 +10,7 @@ import pytest
 from danmu_intel.pipeline import collect_facts, generate_and_publish
 from danmu_intel.report.assemble import ReportContent, build_content
 from danmu_intel.report.forms import ReportScope, form_of
-from danmu_intel.report.interpreter import LLM_STATE_LLM, LLM_STATE_RULE
+from danmu_intel.report.forms import LLM_STATE_LLM, LLM_STATE_RULE
 from danmu_intel.report.publish import (
     PublishRefused,
     load_content,

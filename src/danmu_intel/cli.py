@@ -27,6 +27,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 
 from danmu_intel.common import paths
@@ -406,16 +407,20 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
+    from danmu_intel.report.llm.interpreter import interpreter_for
+
     completed = tuple(sorted(set(args.completed_game))) if args.completed_game else None
     conn = open_db()
     try:
         try:
+            interpreter = interpreter_for(conn)
             result = generate_and_publish(
                 conn,
                 args.match_id,
                 kind=args.kind,
                 completed_games=completed,
                 trigger_game_no=args.trigger_game,
+                interpreter=interpreter,
                 data_root=paths.data_dir(),
             )
         except PublishRefused as exc:
@@ -431,9 +436,26 @@ def _cmd_report(args: argparse.Namespace) -> int:
         f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
         f"事实层哈希 {result.content.fact_layer_hash}"
     )
+    _print_interpretation_status(interpreter, conn, args.match_id, result.content)
     for item in result.checks:
         print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")
     return 0
+
+
+def _print_interpretation_status(interpreter, conn, match_id: int, content) -> None:
+    """解读层状态一行：降级原因 + 本次成本（NFR-C-3 的可见性；完整后台页属 T12）。"""
+    from danmu_intel.report.llm import ledger
+    from danmu_intel.report.llm.interpreter import LLMInterpreter
+
+    note = str(getattr(interpreter, "note", ""))
+    if isinstance(interpreter, LLMInterpreter):
+        totals = ledger.spend(conn, match_id, now_ms=int(time.time() * 1000))
+        print(
+            f"  解读层：LLM 调用 {interpreter.calls} 次，本次 ¥{interpreter.spent_cny:.4f}｜"
+            f"单场累计 ¥{totals.match_cny:.4f}（硬闸 ¥0.3）｜当日累计 ¥{totals.day_cny:.4f}（硬闸 ¥10）"
+        )
+    if note:
+        print(f"  降级原因：{note}")
 
 
 def _cmd_reports(args: argparse.Namespace) -> int:

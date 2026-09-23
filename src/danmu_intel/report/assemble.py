@@ -120,21 +120,12 @@ def build_content(
 ) -> ReportContent:
     """组装一份报告的内容。纯函数（除可注入的解读层与计时器）。"""
     speaker = ensure_interpreter(interpreter)
-    header = ReportHeader(
-        kind=form.kind,
-        version=version,
-        fact_layer_hash=fact_layer_hash(facts),
-        llm_state=speaker.state,
-    )
+    hash_ = fact_layer_hash(facts)
     specs = [SPECS_BY_NO[no] for no in form.segments]
     bodies: dict[int, tuple[str, Sequence[SourceRef]]] = {}
 
-    fact_parts: dict[int, str] = {
-        spec.no: fact_body(spec.no, facts, header) for spec in specs if spec.has_fact
-    }
-    if timing is not None:
-        timing.mark("fact_assembly")
-
+    # 解读先跑、表头后建：第 10 段要印**最终**的 `llm_state` 与降级原因，
+    # 而解读层的 state 只有在它跑完之后才确定（调用失败、校验不过都会降级）。
     interpretation_parts: dict[int, str] = {}
     for spec in specs:
         if not spec.has_interpretation:
@@ -145,6 +136,19 @@ def build_content(
         interpretation_parts[spec.no] = f"{INTERPRETATION_MARK}{text}"
     if timing is not None:
         timing.mark("interpretation")
+
+    header = ReportHeader(
+        kind=form.kind,
+        version=version,
+        fact_layer_hash=hash_,
+        llm_state=speaker.state,
+        llm_note=str(getattr(speaker, "note", "")),
+    )
+    fact_parts: dict[int, str] = {
+        spec.no: fact_body(spec.no, facts, header) for spec in specs if spec.has_fact
+    }
+    if timing is not None:
+        timing.mark("fact_assembly")
 
     for spec in specs:
         parts = []
@@ -165,6 +169,6 @@ def build_content(
         generated_at=generated_at,
         fact_layer_hash=header.fact_layer_hash,
         llm_state=header.llm_state,
-        meta=report_meta(facts, trigger_game_no=trigger_game_no),
+        meta={**report_meta(facts, trigger_game_no=trigger_game_no), "llm_note": header.llm_note},
         segments=tuple(segments),
     )

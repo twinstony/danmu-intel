@@ -169,10 +169,14 @@ def test_consecutive_failures_counts_only_the_leading_streak():
     ) == 2
 
 
-def test_gated_is_not_counted_as_a_failure():
-    """被闸住是结果不是原因：它不能把连续失败数往上推，否则会自锁。"""
+def test_gated_is_transparent_for_the_health_check():
+    """被闸住既不算失败、也不重置连续失败：否则降级状态会在 gated 行之后被"洗白"。"""
     assert ledger.OUTCOME_GATED not in ledger.FAILURE_OUTCOMES
-    assert ledger.consecutive_failures([ledger.OUTCOME_GATED, ledger.OUTCOME_TIMEOUT]) == 0
+    assert ledger.consecutive_failures([ledger.OUTCOME_GATED, ledger.OUTCOME_TIMEOUT]) == 1
+    assert ledger.consecutive_failures(
+        [ledger.OUTCOME_TIMEOUT, ledger.OUTCOME_GATED, ledger.OUTCOME_TIMEOUT, ledger.OUTCOME_OK]
+    ) == 2
+    assert ledger.consecutive_failures([ledger.OUTCOME_GATED, ledger.OUTCOME_OK]) == 0
 
 
 def test_is_degraded_recovers_after_a_success(conn):

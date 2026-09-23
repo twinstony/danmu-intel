@@ -1,6 +1,7 @@
 """DeepSeek 客户端（OpenAI 兼容，设计 §10.3 / ADR-0003）。
 
-只做一件事：把 `(system, user)` 发出去，拿回文本与 token 用量。三条纪律：
+只做两件事：把 `(system, user)` 发出去并拿回文本与 token 用量；按输出契约
+（`{"segments": {"<段号>": "<正文>"}}`）取回段正文。三条纪律：
 
 1. **单次调用 25 秒超时**（设计 §10.2 的 `interpretation` 阶段预算）；超时按失败处理，
    绝不无限等——快报 2 分钟上线比"等一个慢响应"重要。
@@ -182,3 +183,34 @@ def _parse_reply(body: object, *, model: str, latency_ms: int) -> LLMReply:
         cache_hit_tokens=int(usage.get("prompt_cache_hit_tokens") or 0),
         latency_ms=latency_ms,
     )
+
+
+def parse_segment_text(text: str, *, segment_no: int) -> str:
+    """按输出契约取回段正文：`{"segments": {"<段号>": "<正文>"}}`。
+
+    键集必须**正好**是本次要求的段号（少一个键、多一个键、正文为空都不合格），
+    这是"受约束输出"的落点：模型多写一段就没人认领，少写一段就没内容可发。
+    """
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise LLMProtocolError("模型输出不是 JSON") from exc
+    if not isinstance(payload, dict):
+        raise LLMProtocolError("模型输出不是 JSON 对象")
+    segments = payload.get("segments")
+    if not isinstance(segments, dict):
+        raise LLMProtocolError("模型输出缺少 segments 对象")
+    keys: set[int] = set()
+    for key in segments:
+        try:
+            keys.add(int(key))
+        except (TypeError, ValueError):
+            raise LLMProtocolError(f"模型输出的段号不是数字：{key!r}") from None
+    if keys != {segment_no}:
+        raise LLMProtocolError(
+            f"模型输出的段号不符：期望 {segment_no}，实际 {sorted(keys)}"
+        )
+    value = segments[str(segment_no)]
+    if not isinstance(value, str) or not value.strip():
+        raise LLMProtocolError(f"第 {segment_no} 段的正文不是非空字符串")
+    return value.strip()

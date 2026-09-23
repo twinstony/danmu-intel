@@ -19,7 +19,7 @@ from typing import Callable
 
 from danmu_intel.common.sources import SourceRef, refs_for_lines
 from danmu_intel.report.facts import GameFacts, MatchFacts
-from danmu_intel.report.forms import ReportHeader
+from danmu_intel.report.forms import LLM_STATE_LLM, ReportHeader
 from danmu_intel.stats import final as final_signals
 from danmu_intel.stats.basic import RawLine
 from danmu_intel.stats.gray import contains_identity
@@ -227,10 +227,18 @@ def _gray_signals(facts: MatchFacts, header: ReportHeader) -> str:
     return body
 
 
+def _llm_state_label(header: ReportHeader) -> str:
+    """解读层状态的人话版：降级必须写出**原因**（ADR-0003：降级不静默）。"""
+    if header.llm_state == LLM_STATE_LLM:
+        label = "LLM（受约束调用 + 反幻觉校验）"
+    else:
+        label = "规则直出（解读能力降级，如实标注）"
+    return f"{label} —— 原因：{header.llm_note}" if header.llm_note else label
+
+
 def _sources(facts: MatchFacts, header: ReportHeader) -> str:
     lines = [
-        f"报告形态：{header.kind}｜版本：v{header.version}｜解读层："
-        f"{'LLM' if header.llm_state == 'llm' else '规则直出（解读能力降级，如实标注）'}",
+        f"报告形态：{header.kind}｜版本：v{header.version}｜解读层：{_llm_state_label(header)}",
         f"事实层哈希：{header.fact_layer_hash}（解读层的输入指纹，可回溯当时的事实层）",
         f"算法版本：{facts.algo_version}",
         f"原始记录文件：{len(facts.segments)} 个；本报告覆盖弹幕：{len(facts.all_lines)} 条",

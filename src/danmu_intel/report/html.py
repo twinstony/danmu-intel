@@ -12,7 +12,7 @@ from html import escape
 
 from danmu_intel.common.sources import SourceRef
 from danmu_intel.report.assemble import ReportContent
-from danmu_intel.report.forms import form_of
+from danmu_intel.report.forms import LLM_STATE_LLM, form_of
 from danmu_intel.report.rule_render import format_ts
 from danmu_intel.report.segments import Segment
 
@@ -50,6 +50,8 @@ summary { cursor: pointer; color: #2b6cb0; }
 details ul { margin: 8px 0 0; padding-left: 20px; }
 code { word-break: break-all; font-size: 12px; }
 footer { color: #666; font-size: 13px; padding: 16px 0 32px; }
+.degraded { margin: 12px 0 0; padding: 10px 12px; border-radius: 6px;
+  background: #fffaf0; border: 1px solid #f6ad55; color: #7b341e; font-weight: 600; }
 """
 
 
@@ -132,6 +134,15 @@ def render_report_html(content: ReportContent) -> str:
         f"弹幕 {meta['danmu_count']} 条｜算法版本 {meta['algo_version']}"
     )
     interpretation = [segment for segment in content.segments if segment.has_interpretation]
+    degraded = content.llm_state != LLM_STATE_LLM
+    note = str(meta.get("llm_note") or "")
+    banner = (
+        '<p class="degraded">⚠ 解读能力降级：本次报告的解读段由规则直出'
+        + (f"（{escape(note)}）" if note else "")
+        + "；事实段不受影响。</p>"
+        if degraded
+        else ""
+    )
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -147,6 +158,7 @@ def render_report_html(content: ReportContent) -> str:
 <p class="meta">报告形态 {escape(form.kind)}｜版本 v{content.version}｜
 生成时间 {escape(format_ts(content.generated_at))}｜事实层哈希 {escape(content.fact_layer_hash)}</p>
 <p class="meta">本页标注「解读」的 {len(interpretation)} 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
+{banner}
 </header>
 <nav class="toc"><ol>
 {toc}

@@ -19,7 +19,7 @@ OUTCOME_ERROR = "error"  # 断网 / API 报错 / 响应不可解析
 OUTCOME_REJECTED = "rejected"  # 调通了，但输出不合契约或含事实层之外的新事实
 OUTCOME_GATED = "gated"  # 没调：成本闸或全局降级
 
-#: 算"失败"的结局（连续 N 次失败 → 全局降级）。`gated` 不算失败：它本身是结果而非原因。
+#: 算"失败"的结局（连续 N 次失败 → 全局降级）。
 FAILURE_OUTCOMES: tuple[str, ...] = (OUTCOME_TIMEOUT, OUTCOME_ERROR, OUTCOME_REJECTED)
 
 #: 连续失败到这个次数就认为 LLM 长期不可用（ADR-0003「长时间不可用」）。
@@ -106,9 +106,16 @@ def recent_outcomes(conn: sqlite3.Connection, *, limit: int = 12) -> list[str]:
 
 
 def consecutive_failures(outcomes: list[str]) -> int:
-    """从最新往回数连续失败的次数（纯函数）。"""
+    """从最新往回数连续失败的次数（纯函数）。
+
+    `gated`（被闸住没调）在健康判定里是**透明**的：它记的是"没调用"，不是"调通了"。
+    既不能把它算成失败（会自我锁定：一旦降级就再也恢复不了），也不能让它重置连续失败
+    （那会让"降级 → 记一行 gated → 下次又尝试调用"变成循环）。
+    """
     count = 0
     for outcome in outcomes:
+        if outcome == OUTCOME_GATED:
+            continue
         if outcome not in FAILURE_OUTCOMES:
             break
         count += 1
