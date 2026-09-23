@@ -349,7 +349,7 @@ class RollbackResult:
     aligned: bool
 
 
-def _seals(conn: sqlite3.Connection) -> dict[str, str]:
+def seals(conn: sqlite3.Connection) -> dict[str, str]:
     """落盘文件 → 采集时封存的 SHA256（发布检查的加固项与来源锚点）。"""
     rows = conn.execute("SELECT rel_path, sha256 FROM danmu_segments").fetchall()
     return {row["rel_path"]: row["sha256"] for row in rows}
@@ -394,7 +394,7 @@ def publish_site(
     """原子发布一次：构建 → 检查 → 换产物 → 提交/部署 → 记账（幂等）。"""
     stamp = now_ms() if generated_at is None else generated_at
     build = build_site(conn, data_root=ctx.data_root, generated_at=stamp)
-    checks = run_checks(build, data_root=ctx.data_root, seals=_seals(conn))
+    checks = run_checks(build, data_root=ctx.data_root, seals=seals(conn))
     failed = failures(checks)
     digest = build.tree.digest()
     paywalled = _paywalled(build)
