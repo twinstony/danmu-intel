@@ -6,7 +6,8 @@
 （LLM 调用记账，成本硬闸的数据来源）。
 
 T4 加 `gray_signals`（灰信号，含类别与作废原因）、`audit_log`（人工修正留痕）、
-`config`（统计门槛，改动留审计）。
+`config`（统计门槛，改动留审计）。T7 加 `releases`（发布批次账本：版本标识、树指纹、
+部署与提交指针、本批付费的比赛）。
 
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
@@ -71,6 +72,16 @@ CREATE TABLE IF NOT EXISTS reports(            -- 报告实例（同场同形态
   llm_state TEXT NOT NULL,       -- llm|rule_fallback
   path TEXT, checks_json TEXT, timing_json TEXT,
   UNIQUE(match_id, kind, version));
+
+CREATE TABLE IF NOT EXISTS releases(          -- 发布批次（一次原子发布：产物 + 检查 + 回滚指针）
+  id INTEGER PRIMARY KEY, version INTEGER NOT NULL UNIQUE,
+  tree_digest TEXT NOT NULL,     -- 站点树指纹（幂等判定的依据）
+  state TEXT NOT NULL,           -- live|superseded|rolled_back|failed
+  deployment_id TEXT,            -- Vercel 部署标识（秒级回滚的目标）
+  deploy_ref TEXT,               -- git 提交（git revert 跟进用）
+  paywalled_matches TEXT NOT NULL DEFAULT '[]',  -- 本批付费的比赛（转公开的翻转依据）
+  pages_json TEXT NOT NULL, checks_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS notifications(      -- 待投递事件（采集异常事件的出口）
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL,

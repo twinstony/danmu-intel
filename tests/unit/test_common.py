@@ -147,6 +147,7 @@ def test_db_creates_all_tables(data_root):
             "matches",
             "metrics",
             "notifications",
+            "releases",
             "reports",
             "room_sessions",
             "rooms",
