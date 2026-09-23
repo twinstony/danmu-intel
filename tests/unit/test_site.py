@@ -156,12 +156,13 @@ def test_navigation_is_the_same_on_every_page_and_every_link_lands(ledger):
     paths = set(build.tree.paths)
     for page in build.tree.pages:
         assert page.nav == NAV_ITEMS
+        links = set(page.links)
+        assert links, f"{page.path} 没有任何站内链接"
         for _, target in page.nav:
             assert target in paths
+            assert target in links, f"{page.path} 的导航项没有渲染到页面上：{target}"
         for target in page.links:
             assert target in paths, f"{page.path} 链到了不存在的页面 {target}"
-        if not page.is_report:
-            assert page.links, f"{page.path} 没有任何站内链接"
     # 每个页面都从首页可达（无孤儿页面）
     reachable = {"index.html"}
     frontier = ["index.html"]
@@ -244,6 +245,17 @@ def test_live_match_pages_are_paid_and_ended_on_public(three_game_ledger):
     assert brief_after.visibility == paywall.VISIBILITY_PUBLIC
     assert paywall.PAYWALL_MARK not in brief_after.html
     assert body_snippet(build, "live_brief", 0) in brief_after.html
+
+
+def test_report_pages_carry_the_site_navigation(ledger):
+    """报告页也是站点的一部分：读者从报告页能走回索引、历史库、画像库、灰信号、校验、订阅。"""
+    publish_forms(ledger)
+    build = build_site(ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT)
+    page = build.tree.page(report_page_path(1, "full"))
+    assert '<nav class="site">' in page.html
+    for label, target in NAV_ITEMS:
+        assert label in page.html
+        assert target in page.links
 
 
 def test_match_page_reports_segment_scale(ledger):

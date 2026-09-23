@@ -106,6 +106,13 @@ def check_navigation_unique(build: SiteBuild) -> CheckResult:
         for target in targets:
             if target not in paths:
                 problems.append(f"{page.path} 的导航项指向不存在的页面 {target}")
+        links = set(page.links)
+        missing_nav = [target for target in targets if target not in links]
+        if missing_nav:
+            problems.append(
+                f"{page.path} 的导航项没有渲染到页面上（少 {len(missing_nav)} 项："
+                f"{'、'.join(missing_nav[:2])}）"
+            )
         for target in page.links:
             if target not in paths:
                 problems.append(f"{page.path} 链到了不存在的页面 {target}")

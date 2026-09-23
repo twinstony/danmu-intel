@@ -365,8 +365,7 @@ class SiteBuild:
 
 def _layout(page_path: str, title: str, body: str, *, subtitle: str = "") -> str:
     nav = " ".join(
-        f'<a href="{escape(relative_href(page_path, target))}">{escape(label)}</a>'
-        for label, target in NAV_ITEMS
+        f'<a href="{escape(href)}">{escape(label)}</a>' for label, href in nav_links(page_path)
     )
     meta = f'<p class="meta">{escape(subtitle)}</p>' if subtitle else ""
     return f"""<!DOCTYPE html>
@@ -390,6 +389,11 @@ def _layout(page_path: str, title: str, body: str, *, subtitle: str = "") -> str
 </body>
 </html>
 """
+
+
+def nav_links(page_path: str) -> tuple[tuple[str, str], ...]:
+    """本页的站点导航（标签 + 相对本页的链接）：报告页也带上它，读者不会走进死胡同。"""
+    return tuple((label, relative_href(page_path, target)) for label, target in NAV_ITEMS)
 
 
 def _link(page_path: str, target: str, label: str) -> str:
@@ -967,7 +971,11 @@ def _build_tree(facts: SiteFacts) -> SiteTree:
             SitePage(
                 path=material.page_path,
                 title=f"{match.league} {match.team_a} vs {match.team_b} 情报（{material.label}）",
-                html=render_report_html(material.content, visibility=material.visibility),
+                html=render_report_html(
+                    material.content,
+                    visibility=material.visibility,
+                    nav=nav_links(material.page_path),
+                ),
                 nav=NAV_ITEMS,
                 league=match.league,
                 match_id=match.id,

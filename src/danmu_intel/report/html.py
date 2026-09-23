@@ -4,6 +4,9 @@
 读者可自己复核。事实段与解读段在样式与标注上可区分（需求 §6.9 第 2 条）。
 无外部脚本、无外部字体、无第三方请求（NFR-A-2 / NFR-P-3）。
 
+`nav` 是站点的固定栏目（`(标签, 相对本页的链接)`）：报告页因此也能在站内导航
+（发布器出整棵树时传入；单页渲染时可以不带）。
+
 第二条硬规则（ADR-0009 / ADR-0015）：**付费页面上没有任何段正文**。
 `visibility` 由调用方按比赛状态机给出（`common/paywall.py`），付费时只渲染标题、
 元信息、段目与付费说明 —— 正文一个字节都不进静态产物。
@@ -13,6 +16,7 @@ from __future__ import annotations
 
 import re
 from html import escape
+from typing import Sequence
 
 from danmu_intel.common import paywall
 from danmu_intel.common.sources import SourceRef
@@ -64,6 +68,7 @@ footer { color: #666; font-size: 13px; padding: 16px 0 32px; }
   background: #edf2f7; border: 1px solid #a0aec0; color: #2d3748; font-weight: 600; }
 .seg--locked { border-left: 4px solid #a0aec0; }
 .kind--locked { background: #edf2f7; color: #2d3748; }
+nav.site { display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 8px 0 4px; font-size: 14px; }
 """
 
 
@@ -137,11 +142,17 @@ def _segment_html(segment: Segment, *, locked: bool) -> str:
     )
 
 
-def render_report_html(content: ReportContent, *, visibility: str) -> str:
+def render_report_html(
+    content: ReportContent,
+    *,
+    visibility: str,
+    nav: Sequence[tuple[str, str]] = (),
+) -> str:
     """渲染完整页面。段落由 `assemble.build_content` 给出（已保证形态段集齐备）。
 
     `visibility` 必填：调用方必须显式说明这页是公开还是付费（`paywall.visibility(比赛状态)`）。
     缺省成公开会让「忘了按状态机判定」变成静默泄漏，因此不设缺省值。
+    `nav` 是站点固定栏目（标签 + 相对本页的链接），发布器出整棵树时传入。
     """
     if visibility not in paywall.VISIBILITIES:
         raise ValueError(f"未知的可见性：{visibility}（允许：{','.join(paywall.VISIBILITIES)}）")
@@ -162,6 +173,15 @@ def render_report_html(content: ReportContent, *, visibility: str) -> str:
         f"{meta['league']}｜{meta['match_title']}｜状态 {meta['state']}｜"
         f"覆盖节点 {'、'.join(f'G{no}' for no in meta['covered_games']) or '无'}{excluded_note}｜"
         f"弹幕 {meta['danmu_count']} 条｜算法版本 {meta['algo_version']}"
+    )
+    nav_html = (
+        '<nav class="site">'
+        + " ".join(
+            f'<a href="{escape(href)}">{escape(label)}</a>' for label, href in nav
+        )
+        + "</nav>"
+        if nav
+        else ""
     )
     interpretation = [segment for segment in content.segments if segment.has_interpretation]
     match_label = f"{meta['league']} {meta['match_title']}"
@@ -200,6 +220,7 @@ def render_report_html(content: ReportContent, *, visibility: str) -> str:
 <p class="meta">本页标注「解读」的 {len(interpretation)} 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
 {lock_banner}
 {banner}
+{nav_html}
 </header>
 <nav class="toc"><ol>
 {toc}
