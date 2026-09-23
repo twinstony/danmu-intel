@@ -20,7 +20,7 @@ from danmu_intel.report.html import parse_sources
 from danmu_intel.report.segments import SEGMENTS
 from tools.check_no_secrets import scan_tree
 
-from conftest import load_huya_fixture
+from conftest import load_fixture
 from tests.contract.test_adapter_contract import ReplayTransport
 
 PAGE = '"lProfileRoom":660000,"lYyid":1486578378,"lChannelId":1346609715,"lSubChannelId":1346609715,"eLiveStatus":2,"sNick":"样例主播","sRoomName":"标题","sGameFullName":"英雄联盟"'
@@ -31,7 +31,7 @@ def replayed(request, monkeypatch):
     """把虎牙适配器接到录制帧上（不连网）。"""
     from danmu_intel.collect.huya import HuyaAdapter
 
-    frames = [bytes.fromhex(record["frame_hex"]) for record in load_huya_fixture() if record["kind"] == "danmaku"]
+    frames = [bytes.fromhex(record["frame_hex"]) for record in load_fixture("huya") if record["kind"] == "danmaku"]
     adapter = HuyaAdapter(transport=ReplayTransport([frames]))
     monkeypatch.setattr("danmu_intel.collect.ADAPTERS", {"huya": adapter})
     monkeypatch.setattr("danmu_intel.collect.adapter.RECONNECT_BACKOFF_S", (60.0,))

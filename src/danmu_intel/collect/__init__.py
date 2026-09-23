@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from danmu_intel.collect.adapter import Adapter, Probe, RoomKey, reconnecting
 from danmu_intel.collect.huya import HuyaAdapter
+from danmu_intel.collect.soop import SoopAdapter
 
 ADAPTERS: dict[str, Adapter] = {
     HuyaAdapter.platform: HuyaAdapter(),
+    SoopAdapter.platform: SoopAdapter(),
 }
 
 
