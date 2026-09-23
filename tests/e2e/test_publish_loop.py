@@ -178,7 +178,12 @@ def test_auto_republish_failure_does_not_roll_back_the_state_write(
     assert site_version(site_root)["version"] == 1
 
 
-def test_publish_without_vercel_credentials_says_what_to_do(three_game_ledger, site_root, capsys):
+def test_publish_without_vercel_credentials_says_what_to_do(
+    three_game_ledger, site_root, capsys, monkeypatch
+):
+    """没有凭据时如实报错并指路 --no-deploy；测试环境里先摘掉真实凭据（断网可跑）。"""
+    for name in ("VERCEL_TOKEN", "VERCEL_PROJECT_ID"):
+        monkeypatch.delenv(name, raising=False)
     ledger = three_game_ledger
     publish_brief(ledger)
     assert main(["publish"]) == 2
