@@ -23,7 +23,8 @@ from pathlib import Path
 
 from typing import Mapping
 
-from danmu_intel.common import paths
+from danmu_intel.common import paths, paywall
+from danmu_intel.common.matches import get_match
 from danmu_intel.common.sources import SourceRef, compute_digest, file_digest, resolve
 from danmu_intel.report.assemble import ReportContent
 from danmu_intel.report.forms import ReportForm, Timing, form_of
@@ -71,6 +72,7 @@ class PublishResult:
     content: ReportContent
     checks: tuple[CheckResult, ...]
     timing: dict[str, object]
+    visibility: str = paywall.VISIBILITY_PUBLIC
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,11 +321,17 @@ def publish(
 
     `seals` 是「落盘文件 → 采集时封存的 SHA256」（`danmu_segments.sha256`），
     来源检查拿它当证据锚点。
+
+    页面可见性由**比赛状态机**决定（ADR-0009 / ADR-0015）：非 `ended` 的比赛只写出
+    付费页 —— 付费时一个段正文都不进静态文件，正文只经 `publish/access.py` 出口。
     """
     form = form_of(content.kind)
     checks = run_checks(content, timing=timing, data_root=data_root, seals=seals)
     if timing is not None:
         timing.mark("publish_checks")
+
+    match_state = get_match(conn, content.match_id).state
+    visibility = paywall.visibility(match_state)
 
     failures = tuple(item for item in checks if item.blocking and not item.passed)
     game_no = content.meta.get("trigger_game_no")
@@ -343,7 +351,7 @@ def publish(
 
     target = paths.report_page_path(content.match_id, content.kind)
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(render_report_html(content), encoding="utf-8")
+    target.write_text(render_report_html(content, visibility=visibility), encoding="utf-8")
     if timing is not None:
         timing.mark("render")
 
@@ -365,4 +373,5 @@ def publish(
         content=content,
         checks=checks,
         timing=timing.as_dict(form) if timing is not None else {},
+        visibility=visibility,
     )

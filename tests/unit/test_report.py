@@ -13,6 +13,7 @@ from danmu_intel.pipeline import collect_facts
 from danmu_intel.report.assemble import build_content
 from danmu_intel.report.facts import fact_layer_hash, scope_facts
 from danmu_intel.report.forms import ReportScope, form_of
+from danmu_intel.common import paywall
 from danmu_intel.report.html import NATURE_CLASSES, nature_class, parse_sources, render_report_html
 from danmu_intel.report.rule_render import INTERPRETATION_MARK, format_ts
 from danmu_intel.report.segments import (
@@ -192,7 +193,7 @@ def test_nature_class_covers_every_requirement_nature():
 
 def test_render_report_html_contains_all_segments_and_sources(ledger):
     content = content_of(ledger)
-    html = render_report_html(content)
+    html = render_report_html(content, visibility=paywall.VISIBILITY_PUBLIC)
     assert html.startswith("<!DOCTYPE html>")
     assert html.count('<section class="seg ') == 11
     for spec in SEGMENTS:
@@ -212,7 +213,7 @@ def test_render_report_html_escapes_content(ledger):
         "UPDATE matches SET team_a=?, team_b=? WHERE id=?", ("<script>", "LNG&Co", ledger.match_id)
     )
     ledger.conn.commit()
-    html = render_report_html(content_of(ledger))
+    html = render_report_html(content_of(ledger), visibility=paywall.VISIBILITY_PUBLIC)
     assert "&lt;script&gt;" in html
     assert "LNG&amp;Co" in html
     assert "<script>" not in html

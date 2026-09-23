@@ -12,7 +12,11 @@
   ],
   "kills": [                                   -- 官方事件序列（可选；击杀轴首选来源）
     {"ts": 1758451260000, "side": "team_a", "note": "一血"}
-  ]
+  ],
+  "lineups": {                                 -- 官方阵容（可选；画像库的选手页只认它）
+    "team_a": ["选手甲", "选手乙"],
+    "team_b": ["选手丙", "选手丁"]
+  }
 }
 ```
 
@@ -71,6 +75,25 @@ def score_for_game(official_result: dict[str, Any] | None, game_no: int) -> tupl
     if overall:
         return overall, "match"
     return None, "missing"
+
+
+def lineups(official_result: dict[str, Any] | None) -> dict[str, tuple[str, ...]]:
+    """官方阵容（可选）：`{"team_a": (...), "team_b": (...)}`。
+
+    画像库的**选手页只认这份数据**（ADR-0015 决策 9）：原始弹幕只存加盐用户哈希，
+    不从弹幕里推断「选手」是谁；没有阵容就不生成选手页。字段残缺的条目直接跳过
+    （官方数据不做残缺补全）。
+    """
+    entries = _payload(official_result).get("lineups")
+    if not isinstance(entries, dict):
+        return {}
+    cleaned: dict[str, tuple[str, ...]] = {}
+    for side in (SIDE_TEAM_A, SIDE_TEAM_B):
+        names = entries.get(side) or []
+        if not isinstance(names, list):
+            continue
+        cleaned[side] = tuple(str(name) for name in names if str(name).strip())
+    return {side: names for side, names in cleaned.items() if names}
 
 
 def kills(official_result: dict[str, Any] | None) -> tuple[dict[str, Any], ...]:
