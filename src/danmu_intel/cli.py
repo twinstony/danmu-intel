@@ -184,7 +184,8 @@ def _cmd_contribution(args: argparse.Namespace) -> int:
 
 
 def _cmd_events(args: argparse.Namespace) -> int:
-    from danmu_intel.collect.incidents import recent
+    """待投递事件（采集异常 + 解读层降级/成本闸报警），投递属 T11。"""
+    from danmu_intel.common.notifications import recent
 
     conn = open_db()
     try:
@@ -192,13 +193,18 @@ def _cmd_events(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     if not incidents:
-        print("没有采集异常事件")
+        print("没有待投递事件")
         return 0
     for item in incidents:
-        room = f"{item.payload.get('platform')}/{item.payload.get('room_id')}"
-        detail = {key: value for key, value in item.payload.items() if key not in {"platform", "room_id", "match_id"}}
+        room = item.payload.get("platform")
+        source = f"{room}/{item.payload.get('room_id')}" if room else "解读层"
+        detail = {
+            key: value
+            for key, value in item.payload.items()
+            if key not in {"platform", "room_id", "match_id"}
+        }
         print(
-            f"#{item.id} {_stamp(item.created_at)}｜{item.kind}（{item.severity}，{item.state}）｜{room}｜{json.dumps(detail, ensure_ascii=False)}"
+            f"#{item.id} {_stamp(item.created_at)}｜{item.kind}（{item.severity}，{item.state}）｜{source}｜{json.dumps(detail, ensure_ascii=False)}"
         )
     return 0
 
@@ -502,7 +508,7 @@ def build_parser() -> argparse.ArgumentParser:
     contribution.add_argument("--match-id", type=int, required=True)
     contribution.set_defaults(func=_cmd_contribution)
 
-    events = sub.add_parser("events", help="采集异常事件（待投递）")
+    events = sub.add_parser("events", help="待投递事件（采集异常 / 解读层降级与成本闸报警）")
     events.add_argument("--match-id", type=int, default=None)
     events.add_argument("--limit", type=int, default=20)
     events.set_defaults(func=_cmd_events)

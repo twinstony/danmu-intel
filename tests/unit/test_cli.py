@@ -224,7 +224,7 @@ def test_events_prints_incidents(data_root, conn, capsys):
 
 def test_events_reports_empty(data_root, capsys):
     assert main(["events"]) == 0
-    assert "没有采集异常事件" in capsys.readouterr().out
+    assert "没有待投递事件" in capsys.readouterr().out
 
 
 def test_boundaries_resolves_and_records_conflict(ledger, capsys):
