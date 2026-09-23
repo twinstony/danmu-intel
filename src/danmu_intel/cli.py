@@ -660,21 +660,23 @@ def _cmd_match_set_state(args: argparse.Namespace) -> int:
             target=str(match.id),
             detail={"from": before.state, "to": match.state},
         )
-        outcomes = ()
-        if match.state == "ended" and before.state != "ended":
+        print(f"比赛 #{match.id} 状态：{before.state} → {match.state}")
+        if match.state != "ended" or before.state == "ended":
+            outcomes = ()
+        else:
             try:
                 outcomes = sync_ended(conn, ctx=_release_context(args))
-            except (VercelError, CredentialError) as exc:
+            except (VercelError, CredentialError, ReleaseRefused) as exc:
                 print(f"错误：{exc}", file=sys.stderr)
                 print(
                     f"比赛 #{match.id} 状态已写入 {match.state}，但自动再发布没做成："
-                    "线上仍是旧版，请用 --no-deploy 出产物或配好 Vercel 凭据后重跑",
+                    "线上仍是旧版（状态机的写入是事实，不因此回退），"
+                    "请修掉发布检查的问题后重跑 --no-deploy 或 --deploy",
                     file=sys.stderr,
                 )
                 return 1
     finally:
         conn.close()
-    print(f"比赛 #{match.id} 状态：{before.state} → {match.state}")
     if not outcomes:
         print("  没有需要再发布的页面（比赛状态与线上可见性一致）")
         return 0

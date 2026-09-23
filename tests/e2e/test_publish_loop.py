@@ -147,6 +147,37 @@ def test_rollback_needs_a_deployment(three_game_ledger, site_root, capsys):
     assert "没有部署标识" in err or "无法回滚" in err
 
 
+def test_auto_republish_failure_does_not_roll_back_the_state_write(
+    three_game_ledger, site_root, capsys
+):
+    """状态已写入 `ended`，但再发布被检查拦下：如实报错，不回退状态机（线上仍旧版）。"""
+    ledger = three_game_ledger
+    publish_brief(ledger)
+    assert main(["publish", "--no-deploy"]) == 0
+    capsys.readouterr()
+
+    row = ledger.conn.execute(
+        "SELECT id, content_json FROM reports WHERE kind='live_brief' AND state='published'"
+    ).fetchone()
+    payload = json.loads(row["content_json"])
+    payload["segments"] = [item for item in payload["segments"] if item["no"] != 9]
+    ledger.conn.execute(
+        "UPDATE reports SET content_json=? WHERE id=?", (json.dumps(payload, ensure_ascii=False), row["id"])
+    )
+    ledger.conn.commit()
+
+    assert main(["match", "set-state", "--match-id", str(ledger.match_id), "--state", "ended",
+                 "--no-deploy"]) == 1
+    captured = capsys.readouterr()
+    assert "状态：live → ended" in captured.out
+    assert "自动再发布没做成" in captured.err
+    state = ledger.conn.execute(
+        "SELECT state FROM matches WHERE id=?", (ledger.match_id,)
+    ).fetchone()["state"]
+    assert state == "ended", "状态机的写入是事实，不因发布失败而回退"
+    assert site_version(site_root)["version"] == 1
+
+
 def test_publish_without_vercel_credentials_says_what_to_do(three_game_ledger, site_root, capsys):
     ledger = three_game_ledger
     publish_brief(ledger)
