@@ -215,7 +215,7 @@ def render_report_html(
 <header>
 <h1>{escape(title)}</h1>
 <p class="meta">{escape(meta_line)}</p>
-<p class="meta">报告形态 {escape(form.kind)}｜版本 v{content.version}｜可见性 {visibility_label}｜
+<p class="meta">报告形态 {escape(form.kind)}｜版本 v{content.version}｜页面可见性 {visibility_label}（按比赛状态机判定）｜
 生成时间 {escape(format_ts(content.generated_at))}｜事实层哈希 {escape(content.fact_layer_hash)}</p>
 <p class="meta">本页标注「解读」的 {len(interpretation)} 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
 {lock_banner}

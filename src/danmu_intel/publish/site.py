@@ -414,12 +414,14 @@ def _stamp(ts: int) -> str:
 
 
 def _report_row(facts: SiteFacts, page_path: str, material: ReportMaterial) -> str:
+    """一行报告：日期｜联赛与对阵｜形态与版本｜可见性｜报告页（在比赛页上不再重复链自己）。"""
+    match_path = match_page_path(material.match_id)
+    back = "" if page_path == match_path else f"｜{_link(page_path, match_path, '比赛页')}"
     return (
         f"<li>{escape(_stamp(material.generated_at))}｜"
         f"{escape(_match_label(facts.match(material.match_id)))}｜"
         f"{escape(material.label)} v{material.version}｜{_visibility_tag(material.visibility)}｜"
-        f"{_link(page_path, material.page_path, '报告页')}｜"
-        f"{_link(page_path, match_page_path(material.match_id), '比赛页')}</li>"
+        f"{_link(page_path, material.page_path, '报告页')}{back}</li>"
     )
 
 
