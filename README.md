@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5+T6）
+## 当前能力（T1+T2+T3+T4+T5+T6+T7）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -37,7 +37,14 @@
 （`llm_state='rule_fallback'`，命令输出、报告第 10 段与页面横幅都写明原因）。
 凭据只从仓库外 `.env`（0600）读，不入库、不入 git。
 
-不含付费墙、公网发布、Twitch/KICK（注册表留位）、后台（见设计 §19 实施分层）。
+**T7**：**发布闭环** —— 整棵**站点树**（索引 / 历史情报库 / 联赛页 / 比赛页 / 报告页 /
+画像库 / 灰信号页 / 验证闭环页 / 订阅页）经 **7 项纯函数检查**（需求 §6.8 的 6 项 +
+来源引用可达加固）后**原子发布**（`site/.staging` → 检查 → 逐条目 `os.replace` → 提交推送 →
+Vercel 构建；任一项不过就一个条目都不换，线上保持上一版）；**秒级回滚**（Vercel 即时回滚 +
+`git revert` 跟进对齐账本）；比赛结束**自动**再发布公开版（幂等）；**付费正文不进静态产物**
+（付费页只有标题、段目与付费说明，正文只经凭据 API 返回）。
+
+不含会员付费闭环、通知投递、后台、站点统计（见设计 §19 实施分层）。
 
 ## 安装
 
@@ -85,7 +92,17 @@ danmu-intel report --match-id 1 --kind full      # 完整版 → site/matches/1/
 danmu-intel report --match-id 1 --kind review    # 复盘版 → site/matches/1/review.html
 danmu-intel reports --match-id 1                 # 已发布的形态 × 版本（含事实层哈希）
 
-# ⑥ 自检
+# ⑦ 出整棵站点树并发布（7 项检查 → 原子替换 → 提交/部署；默认推 git + 调 Vercel）
+danmu-intel publish --dry-run        # 只跑检查：看哪一项会拦下（不动产物）
+danmu-intel publish --no-deploy      # 只落本地产物（不推 git、不调 Vercel）
+danmu-intel publish                  # 正式发布（凭据与项目在仓库外 .env）
+danmu-intel releases                 # 发布批次账本：版本/指纹/提交/部署/本批付费的比赛
+
+# ⑧ 比赛结束 → 自动转公开；出错 → 秒级回滚
+danmu-intel match set-state --match-id 1 --state ended   # 状态机写入即触发公开版再发布
+danmu-intel rollback                 # 回滚到上一批（Vercel 即时回滚 + git revert 跟进）
+
+# ⑨ 自检
 danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核来源（文件 + 行范围 + SHA256）
 danmu-intel rebuild        --match-id 1  # AC-13：删统计后重算，结果必须逐字节相同
 python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资产凭据
@@ -136,6 +153,38 @@ danmu-intel report --match-id 1 --kind full
   出现一次成功调用自动恢复；页面横幅与第 10 段写明原因。
 - **可回溯**：每次调用记 `model / prompt_version / tokens / cost_cny / latency_ms / outcome`，
   报告行的 `fact_layer_hash` 指向当时那份事实层。
+
+### 发布闭环怎么看（T7）
+
+- **产物**：`danmu-intel publish` 按库里的比赛、报告账本、灰信号与官方数据汇总出整棵树，
+  写进 `site/`（索引 / 历史情报库 / 联赛页 / 比赛页 / 报告页 / 画像库 / 灰信号页 /
+  验证闭环页 / 订阅页），外加一份 `site/release.json`（版本标识：版本号 + 树指纹 + 页面清单，
+  **最后**写，它是「这一批已完整上线」的标记）。
+- **7 项检查**（`publish/checks.py`，逐项纯函数，输入是产物树 + 比赛状态）：
+  ① 全站导航唯一（无重复条目、无孤儿链接、无孤儿页面，且导航项必须真的渲染在页面上）
+  ② 无旧模板残留 ③ 付费墙正确（逐页对照**比赛状态机**）④ 报告分段完整（对照需求 §6.6 十一段，
+  与报告层用同一断言）⑤ 页面 × 联赛 × 标识一致 ⑥ 无「速览卡」类残留物
+  ⑦ 来源引用可达（加固项：文件 + 行范围 + 封存 SHA256）。
+  **任一项不过都不发布**，并写一条 `critical` 待投递报警（`danmu-intel events` 可查）。
+- **原子发布**：先在 `site/.staging/` 生成，检查全过后逐条目 `os.replace` 换进 `site/`，
+  删掉上一批有、这一批没有的页面（**运维手工放的文件如 `vercel.json` 不动**），
+  最后写 `release.json`。同一棵树再发一次是**幂等**的（指纹没变就不重复提交、不重复部署）。
+- **秒级回滚**：`rollback` 先调 Vercel 即时回滚到上一批的部署，再 `git revert` 掉坏版本的
+  提交让「仓库 = 线上」一致；② 失败不回滚①（线上已经好了），只写一条报警。
+- **结束转公开**：可见性只由 `matches.state` 派生（`state == ended` → 公开）。比赛转
+  `ended` 后 `match set-state` 会自动再发布公开版（`sync_ended`，幂等）；**永不**按文件名
+  或路径判定（ADR-0009）。
+- **付费正文隔离**：比赛结束前，该场报告页只有标题、段目与付费说明 —— 正文与来源一个字节
+  都不进静态文件，`curl` 到页面也拿不到；正文只经 `publish/access.py` 的出口返回（会员凭凭据，
+  比赛结束后所有人可见），HTTP 层属 T9。
+- **选手页**：画像库只由官方数据汇总（队伍页来自比赛登记与官方比分）。**没有官方阵容就不生成
+  选手页** —— 原始弹幕只存加盐用户哈希，不从弹幕里推断「选手」是谁（ADR-0015 决策 9）。
+
+```bash
+# 仓库外 .env 里放发布凭据（0600；绝不入 git）
+printf 'VERCEL_TOKEN=%s\nVERCEL_PROJECT_ID=%s\n' '你的 token' '你的项目 id' \
+  >> ~/danmu-intel-data/.env      # 可选：VERCEL_TEAM_ID、VERCEL_API_BASE
+```
 
 ### 统计门槛怎么调（T4）
 
@@ -192,7 +241,7 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 | **凭据**（`DEEPSEEK_API_KEY` 等） | `~/danmu-intel-data/.env`（**0600，权限不对就拒读**） | 否 |
 | LLM 调用账本 | `db.sqlite3` 的 `llm_calls` 表（成本硬闸的数据源） | 否 |
 | 提示词模板 | `prompts/interpretation/<版本>/` | 是 |
-| 站点产物 | `site/matches/<match_id>/<kind>.html`（每场每形态一份） | 是 |
+| 站点产物 | `site/**`（整棵站点树 + `release.json`；暂存目录 `site/.staging/` 不进 git） | 是 |
 
 `DANMU_INTEL_DATA` / `DANMU_INTEL_SITE` 可覆盖上面两个位置（测试用它指向临时目录）。
 
@@ -235,6 +284,11 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 （断网/报错/超时仍按时发布且标注降级、幻觉被拦下且页面里不出现编造的数字与名字、
 成本闸触及即降级并报警、解读段里的数字都能溯源、凭据零泄漏到页面/库/仓库）。
 凭据扫面还包含 `git log -p --all`：删掉的密钥也算泄漏（AC-12）。
+
+发布闭环的测试缝在**产物树 + 注入的假 Vercel 客户端/假提交器**：
+`tests/unit/test_publish_checks.py` 对 6 项需求检查各有一组「注入缺陷即拦截」的红绿用例，
+`tests/unit/test_release.py` 覆盖原子替换、幂等、失败保留上一版、回滚（含账本对齐失败报警）、
+结束转公开，端到端在 `tests/e2e/test_publish_loop.py`（CLI 全流程，全程不联网）。
 
 ## 边界
 

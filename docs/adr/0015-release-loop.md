@@ -44,16 +44,20 @@
 
 4. **原子发布 = staging → 检查 → 逐条目 `os.replace` 交换 → 最后写 `release.json`**。
    同分区 `os.replace` 对**单个条目**是瞬时的；目标目录非空时换不了目录，因此不换目录，
-   换条目：先在 `site/.staging/` 里生成整棵树，检查全过后按「目录 → 文件 →
-   `release.json`」的顺序逐个原子替换，并把线上多出来的条目删掉。`release.json` 最后落，
-   它因此是「这一批已完整上线」的标记（版本标识：`version` + `git_ref` + `deployment_id`）。
+   换条目：先在 `site/.staging/` 里生成整棵树，检查全过后逐个原子替换，删掉**上一批产物里
+   有、这一批没有**的页面（运维手工放在 `site/` 的文件如 `vercel.json`、`robots.txt`
+   不在发布器的清单里，因此不会被误删），最后落 `release.json` —— 它是「这一批已完整上线」
+   的标记，版本标识是 `version` + `tree_digest`（产物自己就能复核：按文件重算指纹即可；
+   git 提交号只有提交之后才知道，写进产物会变成自指，所以提交号与部署号记在账本里）。
    任一检查不通过 → **不交换任何条目**，线上保持上一版可用（AC-8）。
 
 5. **发布批次账本 `releases`**（只增不改，像 `reports` 一样）：`version`（递增，即版本
    标识）、`tree_digest`（站点树指纹）、`state`（`live` / `superseded` / `rolled_back` /
    `failed`）、`deployment_id`、`deploy_ref`（git 提交）、`paywalled_matches`（本批付费的
-   比赛）、`checks_json`、`payload_json`（页面清单，供回滚与排查）。**幂等**：
-   新树指纹与上一批 `live` 相同 → 直接返回「无变化」，不重复提交、不重复部署。
+   比赛，转公开的翻转依据）、`pages_json`（页面清单，清理与排查用）、`checks_json`。
+   **幂等**：新树指纹与上一批 `live` 相同 → 直接返回「无变化」，不重复提交、不重复部署。
+   推送后按提交号等 Vercel 的 production 部署出现（最多 90 秒，可注入时钟）再记
+   `deployment_id`；等不到就如实记 `NULL`，不假装成功。
 
 6. **回滚两步，顺序不可换**：① 调 Vercel instant rollback 到目标批次的
    `deployment_id`（秒级，线上立刻回到上一版）；② `git revert` 掉**当前坏版本**的提交，
