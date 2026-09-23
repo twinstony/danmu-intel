@@ -18,6 +18,10 @@
     danmu-intel reports --match-id 1                # 已发布的报告版本（FR-C4-9）
     danmu-intel rebuild --match-id 1                # AC-13：删统计重算，断言结果不变
     danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核 文件+行范围+SHA256
+
+`report` 的解读层：配了凭据（仓库外 `.env`，0600，键 `DEEPSEEK_API_KEY`）就走受约束的
+LLM 调用 + 反幻觉校验 + 成本硬闸；没配/超时/报错/校验不过就回落规则直出，并在命令输出、
+报告第 10 段与页面横幅上标注降级与原因（降级不静默）。
 """
 
 from __future__ import annotations

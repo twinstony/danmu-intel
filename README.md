@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5）
+## 当前能力（T1+T2+T3+T4+T5+T6）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -30,7 +30,14 @@
 缺解读段或来源对不上时**拒绝发布**。报告正文消费 T4 的统计产物（终局判定、比分交叉校验、
 边界来源、灰信号样本）。
 
-不含真 LLM、付费墙、公网发布、Twitch/KICK（注册表留位）、后台（见设计 §19 实施分层）。
+**T6**：**解读层 LLM**（DeepSeek，OpenAI 兼容）——受约束输入（提示词版本化于 `prompts/`，
+输入只有事实层 JSON，输出受 JSON Schema 约束：段号 → 文本）+ **反幻觉后置校验**（解读里的
+数字/比分/百分比/名称逐个比对事实层，出现新事实即丢弃重试 1 次，再失败降级）+ **成本硬闸**
+（单次 25 秒超时；单场 > ¥0.3 或当日 > ¥10 立即降级并报警）+ **降级不静默**
+（`llm_state='rule_fallback'`，命令输出、报告第 10 段与页面横幅都写明原因）。
+凭据只从仓库外 `.env`（0600）读，不入库、不入 git。
+
+不含付费墙、公网发布、Twitch/KICK（注册表留位）、后台（见设计 §19 实施分层）。
 
 ## 安装
 
@@ -98,8 +105,37 @@ python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资�
   任一项不通过即拒绝发布（`reports` 留一行 `state='failed'`，页面不落盘）。
 - **时限**：2 / 10 / 15 分钟是形态常量；实测耗时记进 `reports.timing_json`，
   超时**不阻断**发布（NFR-T：准确性优先），但会显示在 `report` 的输出里。
-- 解读层调用点是注入缝（`Interpreter` 协议）；本票只有规则直出兜底，
-  `llm_state='rule_fallback'` 如实标注，真 LLM 属 T6。
+- 解读层调用点是注入缝（`Interpreter` 协议）：T6 的真 LLM 实现了同一个协议，
+  组装与渲染层一行没改。
+
+### 解读层 LLM（T6）
+
+**开箱即用**：配了凭据就走 LLM，没配就规则直出并**标注原因**（不会静默降级）。
+
+```bash
+# ① 凭据只放仓库外，权限必须 600（权限不对会拒绝读取，宁可不发不可泄露）
+install -m 600 /dev/null ~/danmu-intel-data/.env
+printf 'DEEPSEEK_API_KEY=%s\n' '你的密钥' >> ~/danmu-intel-data/.env
+# 可选：DEEPSEEK_MODEL=deepseek-v4-pro / DEEPSEEK_BASE_URL=https://api.deepseek.com
+
+danmu-intel report --match-id 1 --kind full
+# 输出里会写：解读层 llm；调用 7 次，本次 ¥0.0xxx｜单场累计 …｜当日累计 …（硬闸 ¥0.3 / ¥10）
+```
+
+- **受约束输出**：提示词版本化在 `prompts/interpretation/<版本>/`（`PROMPT_VERSION` 是
+  唯一版本来源，段集变了必须改提示词，否则启动即报错）；输入**只有**事实层 JSON，
+  输出必须是 `{"segments": {"<段号>": "<正文>"}}`（键多了少了都算不合格）。
+- **反幻觉后置校验**：抽解读里的数字 / 比分 / 百分比 / 名称，逐个比对事实层
+  （允许集 = 模型看到的那份 JSON + 时间戳的确定性改写，结构编号先屏蔽）；
+  出现新事实 → 丢弃该段重试 1 次（把违规项回灌给模型）→ 仍失败该段规则直出。
+- **失败处理**：单次调用 25 秒超时；超时/断网/报错**不重试**（快报的 2 分钟优先），
+  直接该段降级；解读阶段总预算 25 秒，剩余不足就不再调用。
+- **成本硬闸**：`llm_calls` 逐次记账；单场 ≥ ¥0.3 或当日 ≥ ¥10 → 下次调用前即降级 +
+  写一条 `llm_cost_gate` 报警（`danmu-intel events` 可查，投递属 T11）。
+- **全局降级**：账本里连续 ≥3 次失败（超时/报错/校验不过）→ 后续段落不再调用 LLM，
+  出现一次成功调用自动恢复；页面横幅与第 10 段写明原因。
+- **可回溯**：每次调用记 `model / prompt_version / tokens / cost_cny / latency_ms / outcome`，
+  报告行的 `fact_layer_hash` 指向当时那份事实层。
 
 ### 统计门槛怎么调（T4）
 
@@ -153,6 +189,9 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 | SQLite | `~/danmu-intel-data/db.sqlite3`（WAL） | 否 |
 | 心跳文件 | `~/danmu-intel-data/runtime/heartbeat/<platform>-<room_id>.json` | 否 |
 | 用户哈希盐值 | `~/danmu-intel-data/salt`（0600） | 否 |
+| **凭据**（`DEEPSEEK_API_KEY` 等） | `~/danmu-intel-data/.env`（**0600，权限不对就拒读**） | 否 |
+| LLM 调用账本 | `db.sqlite3` 的 `llm_calls` 表（成本硬闸的数据源） | 否 |
+| 提示词模板 | `prompts/interpretation/<版本>/` | 是 |
 | 站点产物 | `site/matches/<match_id>/<kind>.html`（每场每形态一份） | 是 |
 
 `DANMU_INTEL_DATA` / `DANMU_INTEL_SITE` 可覆盖上面两个位置（测试用它指向临时目录）。
@@ -191,6 +230,12 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 `tests/e2e/test_supervisor_processes.py` 另外用**真进程**跑三个房间，验证
 「不重不漏」与「kill 后 10 秒内拉起」，子进程仍是录制帧回放（`tests/e2e/replay_child.py`）。
 
+解读层的测试缝在**调用点**（`ChatClient`）：假 LLM 提供正常 / 幻觉 / 超时 / 报错四种返回值
+（`tests/unit/test_llm_interpreter.py`），端到端验收在 `tests/e2e/test_llm_interpretation.py`
+（断网/报错/超时仍按时发布且标注降级、幻觉被拦下且页面里不出现编造的数字与名字、
+成本闸触及即降级并报警、解读段里的数字都能溯源、凭据零泄漏到页面/库/仓库）。
+凭据扫面还包含 `git log -p --all`：删掉的密钥也算泄漏（AC-12）。
+
 ## 边界
 
 - 公开弹幕是唯一数据来源，不使用任何需要突破访问限制的手段。
@@ -200,3 +245,6 @@ python3 tools/record_fixtures.py sanitize --platform soop \
   且**不提供任何对外导出接口**。
 - 切片边界的来源与冲突都留档：`slices.boundary_source` + `conflict_note`；人工修正进
   `audit_log`，且自动来源永不覆盖人工修正过的切片（需求 FR-C2-5）。
+- 解读层的纪律由**代码**兜底而不是提示词自觉：模型只看到事实层 JSON，输出受 JSON Schema
+  约束，写完再由反幻觉校验逐项比对事实层；校验不过就丢弃重试，再不过就规则直出并标注。
+  拦不住的部分（中文昵称、"指控性结论"）在本版是靠提示词纪律 + 人工抽检，见 ADR-0014。
