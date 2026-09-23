@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from danmu_intel.common import paths
-from tools.check_no_secrets import main, scan_file, scan_tree
+from tools.check_no_secrets import PATTERNS, main, scan_file, scan_tree
 
 # 假凭据一律**拼接构造**：本测试文件自己也要能通过扫描，
 # 因此不给扫描器开任何白名单/豁免（开了洞的防线不算防线）。
@@ -101,3 +101,31 @@ def test_pre_commit_hook_blocks_secrets(tmp_path):
     )
     assert result.returncode == 1
     assert "疑似可动用资产凭据" in result.stderr
+
+
+def scan_text(text: str) -> list[tuple[int, str, str]]:
+    """按同一套模式扫一段文本（用于扫 git 历史这种非文件输入）。"""
+    hits: list[tuple[int, str, str]] = []
+    for line_no, line in enumerate(text.splitlines(), start=1):
+        for label, pattern in PATTERNS:
+            if pattern.search(line):
+                hits.append((line_no, label, line.strip()[:120]))
+    return hits
+
+
+def test_git_history_has_no_secrets():
+    """AC-12：**历史**里也不能有凭据（"删掉了"不等于没泄漏过）。"""
+    result = subprocess.run(
+        ["git", "log", "-p", "--all"],
+        cwd=paths.repo_root(),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert scan_text(result.stdout) == []
+
+
+def test_scan_text_detects_a_secret_in_history_output():
+    """防线自身要被测：历史扫描器对假凭据必须报警。"""
+    hits = scan_text(f"+++ b/.env\n+OPENAI_API_KEY={FAKE_OPENAI}\n")
+    assert [label for _, label, _ in hits] == ["OpenAI key"]

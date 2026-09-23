@@ -2,7 +2,8 @@
 
 表按能力分批加，**不预留空表**：T1 是 `matches` / `rooms` / `room_sessions` /
 `danmu_segments` / `slices` / `metrics` 六张；T2 加 `notifications`（采集异常事件
-的出口，投递由 T11 接）；T5 加 `reports`（报告三形态的版本账本）。
+的出口，投递由 T11 接）；T5 加 `reports`（报告三形态的版本账本）；T6 加 `llm_calls`
+（LLM 调用记账，成本硬闸的数据来源）。
 
 T4 加 `gray_signals`（灰信号，含类别与作废原因）、`audit_log`（人工修正留痕）、
 `config`（统计门槛，改动留审计）。
@@ -89,6 +90,15 @@ CREATE TABLE IF NOT EXISTS gray_signals(       -- 灰信号（风险提示，不
 CREATE TABLE IF NOT EXISTS audit_log(          -- 一切人工/自动写操作留痕
   id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT NOT NULL,
   action TEXT NOT NULL, target TEXT, detail_json TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS llm_calls(        -- LLM 调用记账（成本硬闸的账本）
+  id INTEGER PRIMARY KEY, match_id INTEGER, segment_no INTEGER,
+  model TEXT NOT NULL, prompt_version TEXT NOT NULL,
+  prompt_tokens INTEGER NOT NULL DEFAULT 0, completion_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_hit_tokens INTEGER NOT NULL DEFAULT 0, cost_cny REAL NOT NULL DEFAULT 0,
+  latency_ms INTEGER NOT NULL DEFAULT 0,
+  outcome TEXT NOT NULL,         -- ok|timeout|error|rejected|gated（gated=闸住没调）
+  reason TEXT, created_at INTEGER NOT NULL);
 
 CREATE TABLE IF NOT EXISTS config(             -- 后台可视化配置（≤60s 生效）
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL,

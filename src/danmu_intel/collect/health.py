@@ -18,7 +18,7 @@ from pathlib import Path
 
 from danmu_intel.collect.adapter import RoomKey
 from danmu_intel.collect.heartbeat import read_room_heartbeat
-from danmu_intel.collect.incidents import Incident, recent
+from danmu_intel.collect.incidents import Notification, recent
 from danmu_intel.common import paths
 from danmu_intel.common.events import dedupe, iter_events
 
@@ -45,7 +45,7 @@ class RoomHealth:
     restart_count: int
     severity: str
     heartbeat_age_ms: int | None
-    last_incident: Incident | None
+    last_incident: Notification | None
 
 
 @dataclass(frozen=True, slots=True)

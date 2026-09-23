@@ -18,6 +18,10 @@
     danmu-intel reports --match-id 1                # 已发布的报告版本（FR-C4-9）
     danmu-intel rebuild --match-id 1                # AC-13：删统计重算，断言结果不变
     danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核 文件+行范围+SHA256
+
+`report` 的解读层：配了凭据（仓库外 `.env`，0600，键 `DEEPSEEK_API_KEY`）就走受约束的
+LLM 调用 + 反幻觉校验 + 成本硬闸；没配/超时/报错/校验不过就回落规则直出，并在命令输出、
+报告第 10 段与页面横幅上标注降级与原因（降级不静默）。
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import asyncio
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 
 from danmu_intel.common import paths
@@ -184,7 +189,8 @@ def _cmd_contribution(args: argparse.Namespace) -> int:
 
 
 def _cmd_events(args: argparse.Namespace) -> int:
-    from danmu_intel.collect.incidents import recent
+    """待投递事件（采集异常 + 解读层降级/成本闸报警），投递属 T11。"""
+    from danmu_intel.common.notifications import recent
 
     conn = open_db()
     try:
@@ -192,13 +198,18 @@ def _cmd_events(args: argparse.Namespace) -> int:
     finally:
         conn.close()
     if not incidents:
-        print("没有采集异常事件")
+        print("没有待投递事件")
         return 0
     for item in incidents:
-        room = f"{item.payload.get('platform')}/{item.payload.get('room_id')}"
-        detail = {key: value for key, value in item.payload.items() if key not in {"platform", "room_id", "match_id"}}
+        room = item.payload.get("platform")
+        source = f"{room}/{item.payload.get('room_id')}" if room else "解读层"
+        detail = {
+            key: value
+            for key, value in item.payload.items()
+            if key not in {"platform", "room_id", "match_id"}
+        }
         print(
-            f"#{item.id} {_stamp(item.created_at)}｜{item.kind}（{item.severity}，{item.state}）｜{room}｜{json.dumps(detail, ensure_ascii=False)}"
+            f"#{item.id} {_stamp(item.created_at)}｜{item.kind}（{item.severity}，{item.state}）｜{source}｜{json.dumps(detail, ensure_ascii=False)}"
         )
     return 0
 
@@ -400,16 +411,20 @@ def _cmd_stats(args: argparse.Namespace) -> int:
 
 
 def _cmd_report(args: argparse.Namespace) -> int:
+    from danmu_intel.report.llm.interpreter import interpreter_for
+
     completed = tuple(sorted(set(args.completed_game))) if args.completed_game else None
     conn = open_db()
     try:
         try:
+            interpreter = interpreter_for(conn)
             result = generate_and_publish(
                 conn,
                 args.match_id,
                 kind=args.kind,
                 completed_games=completed,
                 trigger_game_no=args.trigger_game,
+                interpreter=interpreter,
                 data_root=paths.data_dir(),
             )
         except PublishRefused as exc:
@@ -417,17 +432,36 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 print(f"  发布检查未通过：{item.label}｜{item.detail}", file=sys.stderr)
             print(f"错误：{exc}", file=sys.stderr)
             return 1
+        # 状态行要读账本（`llm_calls`），所以必须在 `conn` 关掉**之前**打印：
+        # 连接关掉之后再查会抛 sqlite3.ProgrammingError，命令在功能启用的当天必崩。
+        form = form_of(result.kind)
+        print(f"已发布{form.label} v{result.version}：{result.path}")
+        print(
+            f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
+            f"事实层哈希 {result.content.fact_layer_hash}"
+        )
+        _print_interpretation_status(interpreter, conn, args.match_id, result.content)
+        for item in result.checks:
+            print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")
+        return 0
     finally:
         conn.close()
-    form = form_of(result.kind)
-    print(f"已发布{form.label} v{result.version}：{result.path}")
-    print(
-        f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
-        f"事实层哈希 {result.content.fact_layer_hash}"
-    )
-    for item in result.checks:
-        print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")
-    return 0
+
+
+def _print_interpretation_status(interpreter, conn, match_id: int, content) -> None:
+    """解读层状态一行：降级原因 + 本次成本（NFR-C-3 的可见性；完整后台页属 T12）。"""
+    from danmu_intel.report.llm import ledger
+    from danmu_intel.report.llm.interpreter import LLMInterpreter
+
+    note = str(getattr(interpreter, "note", ""))
+    if isinstance(interpreter, LLMInterpreter):
+        totals = ledger.spend(conn, match_id, now_ms=int(time.time() * 1000))
+        print(
+            f"  解读层：LLM 调用 {interpreter.calls} 次，本次 ¥{interpreter.spent_cny:.4f}｜"
+            f"单场累计 ¥{totals.match_cny:.4f}（硬闸 ¥0.3）｜当日累计 ¥{totals.day_cny:.4f}（硬闸 ¥10）"
+        )
+    if note:
+        print(f"  降级原因：{note}")
 
 
 def _cmd_reports(args: argparse.Namespace) -> int:
@@ -502,7 +536,7 @@ def build_parser() -> argparse.ArgumentParser:
     contribution.add_argument("--match-id", type=int, required=True)
     contribution.set_defaults(func=_cmd_contribution)
 
-    events = sub.add_parser("events", help="采集异常事件（待投递）")
+    events = sub.add_parser("events", help="待投递事件（采集异常 / 解读层降级与成本闸报警）")
     events.add_argument("--match-id", type=int, default=None)
     events.add_argument("--limit", type=int, default=20)
     events.set_defaults(func=_cmd_events)

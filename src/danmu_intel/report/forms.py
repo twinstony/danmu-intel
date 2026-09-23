@@ -24,6 +24,11 @@ from typing import Callable
 
 from danmu_intel.report.segments import ALL_SEGMENT_NOS
 
+#: 解读层状态（`reports.llm_state` 只有这两个取值，ADR-0003/ADR-0014）：
+#: `llm` = 受约束的 LLM 调用产出了至少一段解读；`rule_fallback` = 至少一段降级为规则直出。
+LLM_STATE_LLM = "llm"
+LLM_STATE_RULE = "rule_fallback"
+
 KIND_LIVE_BRIEF = "live_brief"
 KIND_FULL = "full"
 KIND_REVIEW = "review"
@@ -130,12 +135,17 @@ class Timing:
 
 @dataclass(frozen=True, slots=True)
 class ReportHeader:
-    """一份报告实例的元信息（进第 10 段「数据与溯源」，也是 reports 行的键字段）。"""
+    """一份报告实例的元信息（进第 10 段「数据与溯源」，也是 reports 行的键字段）。
+
+    `llm_note` 是解读层降级的**原因**（无凭据 / 成本闸 / 全局降级 / 某段未过校验）：
+    `llm_state` 只有 `llm` / `rule_fallback` 两个值，"为什么降级"必须另外说清楚。
+    """
 
     kind: str
     version: int
     fact_layer_hash: str
     llm_state: str
+    llm_note: str = ""
 
 
 @dataclass(frozen=True, slots=True)
