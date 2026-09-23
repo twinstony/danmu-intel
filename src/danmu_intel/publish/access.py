@@ -30,6 +30,26 @@ def latest_version(conn: sqlite3.Connection, match_id: int, kind: str) -> int:
     return int(row["v"])
 
 
+def published_versions(conn: sqlite3.Connection) -> tuple[tuple[int, str, int, int], ...]:
+    """全部「已有页面的报告」：`(match_id, kind, version, generated_at)`（同场同形态取最新已发布版）。
+
+    站点产物从账本取报告，因此**产物的内容与账本一致**：页面上印的版本、事实层哈希与
+    `reports` 行是同一份东西（设计 §10.3「同一形态换版即新增版本」）。
+    """
+    rows = conn.execute(
+        """
+        SELECT match_id, kind, MAX(version) AS version, MAX(generated_at) AS generated_at
+        FROM reports WHERE state='published'
+        GROUP BY match_id, kind
+        ORDER BY match_id, kind
+        """
+    ).fetchall()
+    return tuple(
+        (int(row["match_id"]), str(row["kind"]), int(row["version"]), int(row["generated_at"]))
+        for row in rows
+    )
+
+
 def report_content(
     conn: sqlite3.Connection,
     match_id: int,
