@@ -432,18 +432,20 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 print(f"  发布检查未通过：{item.label}｜{item.detail}", file=sys.stderr)
             print(f"错误：{exc}", file=sys.stderr)
             return 1
+        # 状态行要读账本（`llm_calls`），所以必须在 `conn` 关掉**之前**打印：
+        # 连接关掉之后再查会抛 sqlite3.ProgrammingError，命令在功能启用的当天必崩。
+        form = form_of(result.kind)
+        print(f"已发布{form.label} v{result.version}：{result.path}")
+        print(
+            f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
+            f"事实层哈希 {result.content.fact_layer_hash}"
+        )
+        _print_interpretation_status(interpreter, conn, args.match_id, result.content)
+        for item in result.checks:
+            print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")
+        return 0
     finally:
         conn.close()
-    form = form_of(result.kind)
-    print(f"已发布{form.label} v{result.version}：{result.path}")
-    print(
-        f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
-        f"事实层哈希 {result.content.fact_layer_hash}"
-    )
-    _print_interpretation_status(interpreter, conn, args.match_id, result.content)
-    for item in result.checks:
-        print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")
-    return 0
 
 
 def _print_interpretation_status(interpreter, conn, match_id: int, content) -> None:

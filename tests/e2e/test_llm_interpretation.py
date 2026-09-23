@@ -434,3 +434,36 @@ def test_real_http_client_publishes_an_llm_report(ledger, site_root):
     assert all(row.prompt_tokens == 4200 and row.cache_hit_tokens == 3000 for row in rows)
     assert interp.spent_cny > 0 and interp.spent_cny < MATCH_LIMIT_CNY
     assert "从弹幕看，G1 的讨论最集中" in page_text(site_root, ledger.match_id)
+
+
+def test_cli_report_with_credentials_prints_the_cost_and_exits_zero(
+    ledger, site_root, data_root, capsys
+):
+    """**配好凭据**时走生产 CLI：解读层状态行要打印，且退出码为 0。
+
+    回归：状态行读账本（`llm_calls`），一旦在 `conn.close()` 之后打印，
+    就会抛 `sqlite3.ProgrammingError` —— 恰好是用户配好密钥、功能真正上线那一刻。
+    无凭据的 CLI 测试走的是早退分支，碰不到这条路径，因此必须单独盖一条。
+    """
+    from danmu_intel.cli import main
+
+    stub = _StubDeepSeek().start()
+    target = data_root / ".env"
+    target.write_text(
+        f"DEEPSEEK_API_KEY={FAKE_KEY}\n"
+        f"DEEPSEEK_BASE_URL={stub.base_url}\n"
+        f"DEEPSEEK_MODEL=deepseek-v4-flash\n",
+        encoding="utf-8",
+    )
+    target.chmod(0o600)
+    try:
+        assert main(["report", "--match-id", str(ledger.match_id), "--kind", "full"]) == 0
+    finally:
+        stub.stop()
+
+    out = capsys.readouterr().out
+    assert "解读层：LLM 调用" in out
+    assert "单场累计 ¥" in out and "当日累计 ¥" in out
+    assert "降级原因" not in out
+    assert len(stub.requests) == len(INTERPRETATION_SEGMENTS)
+    assert "解读能力降级" not in page_text(site_root, ledger.match_id)
