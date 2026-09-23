@@ -497,3 +497,36 @@ def test_credential_error_message_never_contains_the_key(data_root):
 def alerts_rows(ledger):
     """本场的解读层报警（成本闸 / 全局降级）。"""
     return [item for item in recent_events(ledger.conn, match_id=ledger.match_id) if item.kind in alerts.KINDS]
+
+
+def test_alert_rejects_an_unknown_kind(ledger):
+    with pytest.raises(ValueError, match="未知的解读层报警类型"):
+        alerts.alert(ledger.conn, "not_a_kind", match_id=1, severity="warning")
+
+
+def test_alerts_are_written_with_the_match_id_and_payload(ledger):
+    alerts.alert(
+        ledger.conn,
+        alerts.UNAVAILABLE,
+        match_id=7,
+        severity="critical",
+        detail={"consecutive_failures": 3},
+        timestamp=1_790_064_400_000,
+    )
+    event = recent_events(ledger.conn, match_id=7)[0]
+    assert event.kind == alerts.UNAVAILABLE and event.severity == "critical"
+    assert event.payload == {"match_id": 7, "consecutive_failures": 3}
+    assert event.state == "pending" and event.created_at == 1_790_064_400_000
+
+
+def test_unpriced_model_is_refused_before_any_call(ledger, facts):
+    """直接构造解释器（绕过生产入口）时，价格表也要在调用前把关。"""
+    client = FakeClient(model="gpt-hallucination-9000")
+    interpreter = build(ledger.conn, client)
+
+    text = interpreter.interpret(SPECS_BY_NO[3], facts)
+
+    assert client.calls == []
+    assert text == interpretation_text(3, facts)
+    assert "模型未登记价格" in interpreter.note
+    assert interpreter.state == LLM_STATE_RULE

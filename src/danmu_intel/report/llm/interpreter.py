@@ -147,7 +147,7 @@ class LLMInterpreter:
             try:
                 text = parse_segment_text(reply.text, segment_no=spec.no)
             except LLMProtocolError as exc:
-                self._reject(spec, match_id, reply, str(exc))
+                self._reject(spec, match_id, reply, str(exc), attempt=attempt)
                 correction = (
                     "上一次输出不符合约定：必须是 JSON 对象，键正好是本次要求的段号，"
                     "正文非空。请只输出那个 JSON。\n"
@@ -157,13 +157,23 @@ class LLMInterpreter:
             if not violations:
                 self._record(match_id, spec.no, outcome=ledger.OUTCOME_OK, reply=reply)
                 return text
-            self._reject(spec, match_id, reply, f"含事实层之外的内容：{describe(violations)}")
+            self._reject(
+                spec,
+                match_id,
+                reply,
+                f"含事实层之外的内容：{describe(violations)}",
+                attempt=attempt,
+            )
             correction = correction_note(violations)
         self._degrade(f"第 {spec.no} 段重试后仍含事实层之外的内容，该段规则直出")
         return None
 
     def _preflight(self, match_id: int) -> str | None:
-        """调用前的两道闸：全局降级、成本硬闸。返回降级原因，或 None 表示可以调用。"""
+        """调用前的三道闸：价格表、全局降级、成本硬闸。返回降级原因，或 None 表示可以调用。"""
+        try:
+            price_for(self.client.model)
+        except LookupError as exc:
+            return f"模型未登记价格，拒绝调用（{exc}）"
         outcomes = ledger.recent_outcomes(self.conn)
         if ledger.is_degraded(outcomes):
             reason = (
@@ -226,13 +236,15 @@ class LLMInterpreter:
             self._degrade(f"第 {spec.no} 段调用失败（{exc}），该段规则直出")
             return None
 
-    def _reject(self, spec: SegmentSpec, match_id: int, reply: LLMReply, reason: str) -> None:
+    def _reject(
+        self, spec: SegmentSpec, match_id: int, reply: LLMReply, reason: str, *, attempt: int = 1
+    ) -> None:
         self._record(
             match_id,
             spec.no,
             outcome=ledger.OUTCOME_REJECTED,
             reason=reason,
-            attempt=1,
+            attempt=attempt,
             reply=reply,
         )
 

@@ -25,6 +25,7 @@ from danmu_intel.report.llm.client import (
     LLMTimeout,
     LLMUnavailable,
     UrllibTransport,
+    parse_segment_text,
 )
 
 FAKE_KEY = "sk-" + "client" * 6
@@ -266,3 +267,42 @@ def test_payload_headers_are_json_serialisable():
     headers: Mapping[str, str] = transport.calls[0]["headers"]
     assert json.dumps(dict(headers), ensure_ascii=False)
     assert json.dumps(transport.calls[0]["payload"], ensure_ascii=False)
+
+
+# —— 输出契约（段 id → 文本）——
+
+
+@pytest.mark.parametrize(
+    "payload,message",
+    [
+        ("not json", "不是 JSON"),
+        ("[1, 2]", "不是 JSON 对象"),
+        ('{"other": 1}', "缺少 segments"),
+        ('{"segments": []}', "缺少 segments"),
+        ('{"segments": {"三": "文本"}}', "段号不是数字"),
+        ('{"segments": {"3": "文本", "4": "文本"}}', "段号不符"),
+        ('{"segments": {"4": "文本"}}', "段号不符"),
+        ('{"segments": {"3": ""}}', "不是非空字符串"),
+        ('{"segments": {"3": 3}}', "不是非空字符串"),
+    ],
+)
+def test_parse_segment_text_rejects_a_broken_contract(payload, message):
+    with pytest.raises(LLMProtocolError, match=message):
+        parse_segment_text(payload, segment_no=3)
+
+
+def test_parse_segment_text_returns_the_body():
+    assert parse_segment_text('{"segments": {"3": " 队伍画像：分析 "}}', segment_no=3) == "队伍画像：分析"
+
+
+def test_transport_errors_keep_their_llm_error_subclass():
+    """已经分好类的 LLM 错误要原样向上抛，不许被包成 `LLMUnavailable`。"""
+    transport = FakeTransport(error=LLMTimeout("已经超时了"))
+    with pytest.raises(LLMTimeout, match="已经超时了"):
+        client(transport).complete(system="s", user="u")
+
+
+def test_usage_that_is_not_a_dict_is_ignored():
+    transport = FakeTransport(replies=[{"choices": [{"message": {"content": "解读"}}], "usage": []}])
+    reply = client(transport).complete(system="s", user="u")
+    assert (reply.prompt_tokens, reply.completion_tokens, reply.cache_hit_tokens) == (0, 0, 0)
