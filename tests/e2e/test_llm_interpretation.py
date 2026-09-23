@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
@@ -334,3 +336,99 @@ def test_cli_events_show_interpretation_alerts(ledger, capsys):
     out = capsys.readouterr().out
     assert "llm_cost_gate（warning，pending）" in out
     assert "解读层" in out and "0.31" in out
+
+
+# —— 真 HTTP 路径：本地桩服务器（不连外网，只连 127.0.0.1）——
+
+
+class _StubDeepSeek:
+    """本机桩：模拟 DeepSeek 的 `/chat/completions`，并把收到的请求记下来。"""
+
+    def __init__(self, *, text: str = OK_TEXT) -> None:
+        self.requests: list[dict[str, object]] = []
+        self.text = text
+        self._server = HTTPServer(("127.0.0.1", 0), self._handler())
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+
+    @property
+    def base_url(self) -> str:
+        return f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def start(self) -> "_StubDeepSeek":
+        self._thread.start()
+        return self
+
+    def stop(self) -> None:
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join(timeout=5)
+
+    def _handler(self):
+        stub = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:  # noqa: N802 - http.server 的约定名
+                length = int(self.headers.get("Content-Length", "0"))
+                body = json.loads(self.rfile.read(length))
+                stub.requests.append(
+                    {"path": self.path, "auth": self.headers.get("Authorization"), "body": body}
+                )
+                spec_no = re.search(r"\*\*(\d+) 号段", body["messages"][1]["content"]).group(1)
+                payload = json.dumps(
+                    {"segments": {spec_no: f"第 {spec_no} 段：{stub.text}"}}, ensure_ascii=False
+                )
+                reply = json.dumps(
+                    {
+                        "model": body["model"],
+                        "choices": [{"message": {"role": "assistant", "content": payload}}],
+                        "usage": {
+                            "prompt_tokens": 4200,
+                            "completion_tokens": 380,
+                            "prompt_cache_hit_tokens": 3000,
+                        },
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(reply)))
+                self.end_headers()
+                self.wfile.write(reply)
+
+            def log_message(self, *args) -> None:  # 静音访问日志
+                pass
+
+        return Handler
+
+
+def test_real_http_client_publishes_an_llm_report(ledger, site_root):
+    """走真 `urllib` 传输层（本机桩）：请求形状、账本、页面三者对得上。"""
+    from danmu_intel.report.llm.client import DeepSeekClient
+
+    stub = _StubDeepSeek().start()
+    try:
+        client = DeepSeekClient(api_key=FAKE_KEY, base_url=stub.base_url, model="deepseek-v4-flash")
+        interp = LLMInterpreter(conn=ledger.conn, client=client, prompt_set=load_prompt_set())
+        result = generate_and_publish(
+            ledger.conn,
+            ledger.match_id,
+            kind="full",
+            interpreter=interp,
+            data_root=ledger.data_root,
+            generated_at=GENERATED_AT,
+        )
+    finally:
+        stub.stop()
+
+    assert result.content.llm_state == LLM_STATE_LLM
+    assert interp.calls == len(INTERPRETATION_SEGMENTS) == len(stub.requests)
+    first = stub.requests[0]
+    assert first["path"] == "/chat/completions"
+    assert first["auth"] == f"Bearer {FAKE_KEY}"
+    assert first["body"]["response_format"] == {"type": "json_object"}
+    assert first["body"]["stream"] is False
+
+    rows = llm_ledger.calls_for_match(ledger.conn, ledger.match_id)
+    assert {row.outcome for row in rows} == {llm_ledger.OUTCOME_OK}
+    assert all(row.prompt_tokens == 4200 and row.cache_hit_tokens == 3000 for row in rows)
+    assert interp.spent_cny > 0 and interp.spent_cny < MATCH_LIMIT_CNY
+    assert "从弹幕看，G1 的讨论最集中" in page_text(site_root, ledger.match_id)

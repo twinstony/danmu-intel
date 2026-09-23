@@ -301,12 +301,18 @@ def interpreter_for(conn: sqlite3.Connection, *, clock: Callable[[], float] | No
     try:
         api_key = require_secret(API_KEY_NAME)
     except CredentialError as exc:
-        return RuleInterpreter(note=f"未配置 {API_KEY_NAME}（仓库外 .env，0600）：{exc}")
+        # 页面是公开产物：降级原因里只写"缺什么/怎么修"，不写本机绝对路径
+        reason = (
+            "凭据文件权限不安全（必须是 0600）"
+            if "权限" in str(exc)
+            else f"未配置 {API_KEY_NAME}（仓库外数据目录的 .env，0600）"
+        )
+        return RuleInterpreter(note=reason)
     model = get_secret(MODEL_NAME) or DEFAULT_MODEL
     try:
         price_for(model)
     except LookupError as exc:
-        return RuleInterpreter(note=f"模型未登记价格，拒绝调用：{exc}")
+        return RuleInterpreter(note=f"模型未登记价格，拒绝调用（{model}）")
     return LLMInterpreter(
         conn=conn,
         client=DeepSeekClient(
