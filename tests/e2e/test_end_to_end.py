@@ -15,7 +15,7 @@ from danmu_intel.cli import main
 from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
 from danmu_intel.common.events import JSONL_FIELDS, count_lines, iter_events
-from danmu_intel.pipeline import verify_sources
+from danmu_intel.pipeline import collect_facts, metrics_snapshot, rebuild_metrics, verify_sources
 from danmu_intel.report.html import parse_sources
 from danmu_intel.report.segments import SEGMENTS
 from tools.check_no_secrets import scan_tree
@@ -133,3 +133,90 @@ def test_page_still_complete_when_no_peak(replayed, data_root, site_root, capsys
         json.dumps({"sections": html.count('<section class="seg ')})
     )
     assert metrics["sections"] == 11
+
+
+def test_t4_chain_boundaries_stats_gray_rebuild(replayed, data_root, site_root, capsys):
+    """T4 端到端：切片引擎 → 人工修正留痕 → 统计全集 → 终局判定 → 灰信号 → 静态页 → AC-13。
+
+    对应 issue #7 的验收标准（每条切片有来源、冲突记录、修正留痕、统计可重算、
+    灰信号门槛与渲染零身份）。全程不连外网。
+    """
+    from danmu_intel.common import audit
+    from danmu_intel.common.config import load_stats_config
+    from danmu_intel.pipeline import write_metrics
+    from danmu_intel.stats.basic import ALGO_VERSION
+
+    match_id = 1
+    assert main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG",
+                 "--state", "ended", "--official-result", '{"score":"2:0"}']) == 0
+    assert main(["collect", "--url", "https://www.huya.com/660000", "--seconds", "2",
+                 "--match-id", str(match_id)]) == 0
+    capsys.readouterr()
+
+    conn = open_db()
+    raw = next((data_root / "raw" / "huya").rglob("*.jsonl"))
+    times = [event.ts for _, event in iter_events(raw)]
+    start, end = min(times), max(times) + 1
+    conn.close()
+
+    # ① 切片引擎：报告窗口作为候选（优先级 3）→ 落库并留来源
+    assert main(["boundaries", "--match-id", str(match_id),
+                 "--report-window", f"1:{start}:{end}"]) == 0
+    assert "已写入 G1" in capsys.readouterr().out
+    conn = open_db()
+    row = conn.execute("SELECT * FROM slices WHERE match_id=?", (match_id,)).fetchone()
+    assert row["boundary_source"] == "report_window" and row["conflict_note"] is None
+    assert conn.execute("SELECT COUNT(*) AS n FROM audit_log WHERE action='slice.boundary'").fetchone()["n"] == 1
+
+    # ② 人工修正：必须带理由，落审计，算法版本递增
+    assert main(["slice", "--match-id", str(match_id), "--game-no", "1",
+                 "--start-ms", str(start - 1_000), "--end-ms", str(end),
+                 "--override-by", "管理员", "--override-reason", "对齐官方开赛时间"]) == 0
+    assert "人工修正已留痕" in capsys.readouterr().out
+    row = conn.execute("SELECT * FROM slices WHERE match_id=?", (match_id,)).fetchone()
+    assert row["boundary_source"] == "manual" and row["override_reason"] == "对齐官方开赛时间"
+    assert audit.count(conn, action=audit.SLICE_OVERRIDE) == 1
+
+    # ③ 统计全集 + 终局判定 + 灰信号（门槛来自 config 表）
+    assert main(["stats", "--match-id", str(match_id)]) == 0
+    stats_out = capsys.readouterr().out
+    assert f"算法版本 {ALGO_VERSION}+ov1" in stats_out
+    assert "终局判定：live" in stats_out and "灰信号：0 项达门槛" in stats_out
+
+    assert main(["final", "--match-id", str(match_id)]) == 0
+    assert "终局判定：live" in capsys.readouterr().out
+    assert main(["gray", "--match-id", str(match_id)]) == 0
+    gray_out = capsys.readouterr().out
+    assert "没有达到门槛的灰信号" in gray_out
+    assert "样本：" not in gray_out, "没有达门槛的信号就不该有样本行"
+    assert "user_hash" not in gray_out
+    assert load_stats_config(conn).gray_min_hits == 5
+
+    # ④ 十一段报告页（完整版）：灰信号段必须带纪律与门槛，且不含任何身份标识
+    assert main(["report", "--match-id", str(match_id), "--kind", "full"]) == 0
+    capsys.readouterr()
+    html = (site_root / "matches" / str(match_id) / "full.html").read_text(encoding="utf-8")
+    assert html.count('<section class="seg ') == 11
+    assert "灰信号汇总" in html and "不构成对任何个人或队伍的任何指控" in html
+    assert "边界来源：人工指定 1 局" in html
+    user_hashes = {event.user_hash for _, event in iter_events(raw)}
+    assert user_hashes and all(value not in html for value in user_hashes)
+
+    # ⑤ AC-13：删掉统计结果后仅凭原始记录 + 切片 + 配置重算出完全一致的统计
+    facts = collect_facts(conn, match_id, data_root=data_root)
+    write_metrics(conn, facts)
+    before = metrics_snapshot(conn, match_id, algo_version=facts.algo_version)
+    conn.execute("DELETE FROM metrics")
+    conn.commit()
+    assert metrics_snapshot(conn, match_id) == []
+    assert rebuild_metrics(conn, match_id, data_root=data_root) is True
+    assert metrics_snapshot(conn, match_id, algo_version=facts.algo_version) == before
+    conn.close()
+    assert main(["rebuild", "--match-id", str(match_id)]) == 0
+    assert "AC-13 通过" in capsys.readouterr().out
+
+    # ⑥ 来源逐项复核 + 全库零命中凭据
+    assert main(["verify-sources", "--match-id", str(match_id), "--kind", "full"]) == 0
+    assert "全部来源校验通过" in capsys.readouterr().out
+    assert scan_tree(paths.repo_root()) == []
+    assert scan_tree(data_root) == []

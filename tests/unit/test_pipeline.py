@@ -44,6 +44,14 @@ def test_collect_facts_shape(ledger):
     assert facts.platforms == ["huya"]
     assert facts.room_ids == ["660000"]
     assert facts.generated_at > 0
+    # 逐局的行就是该局范围内的行（统计与溯源同一口径）
+    assert len(facts.games[0].lines) == 55
+    assert len(facts.games[1].lines) == 10
+    assert facts.games[0].metrics["score"]["official"] == "2:0"
+    assert facts.final_judgement.verdict == "live"
+    assert facts.final_judgement.kinds == ()
+    assert facts.gray_signals == ()
+    assert facts.signal_facts == (), "本 fixture 的弹幕里没有任何一类独立信号成立"
 
 
 def test_load_lines_is_ordered_and_traceable(ledger):
@@ -53,15 +61,29 @@ def test_load_lines_is_ordered_and_traceable(ledger):
     assert lines[0].event.ts == ledger.events[0].ts
 
 
+GAME_METRIC_KEYS = {
+    "danmu_total",
+    "distinct_users",
+    "density_curve",
+    "peak",
+    "trough",
+    "score",
+    "kill_timeline",
+    "neutral",
+}
+MATCH_METRIC_KEYS = {"final_signal", "gray_signals"}
+
+
 def test_write_metrics_is_idempotent(ledger):
     facts = collect_facts(ledger.conn, ledger.match_id, data_root=ledger.data_root)
     first = write_metrics(ledger.conn, facts)
     snapshot = metrics_snapshot(ledger.conn, ledger.match_id)
-    assert first == len(facts.games) * 4
+    assert first == len(facts.games) * len(GAME_METRIC_KEYS) + len(MATCH_METRIC_KEYS)
     assert write_metrics(ledger.conn, facts) == first
     assert metrics_snapshot(ledger.conn, ledger.match_id) == snapshot
-    keys = {key for _, key, _ in snapshot}
-    assert keys == {"danmu_total", "distinct_users", "density_curve", "peak"}
+    per_game = {key for game_no, key, _ in snapshot if game_no is not None}
+    assert per_game == GAME_METRIC_KEYS
+    assert {key for game_no, key, _ in snapshot if game_no is None} == MATCH_METRIC_KEYS
     row = ledger.conn.execute(
         "SELECT computed_at, algo_version FROM metrics LIMIT 1"
     ).fetchone()
