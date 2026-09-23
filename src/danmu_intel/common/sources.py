@@ -52,6 +52,11 @@ def compute_digest(path: Path, line_start: int, line_end: int) -> str:
     return hashlib.sha256(b"".join(lines[line_start - 1 : line_end])).hexdigest()
 
 
+def file_digest(path: Path) -> str:
+    """整文件 SHA256 —— 与 `danmu_segments.sha256`（采集时封存的摘要）同口径。"""
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def make_ref(rel_path: str, line_start: int, line_end: int, *, data_root: Path | None = None) -> SourceRef:
     path = (data_root or paths.data_dir()) / rel_path
     return SourceRef(

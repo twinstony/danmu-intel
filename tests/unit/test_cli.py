@@ -27,7 +27,7 @@ def test_match_add_and_get(conn, capsys):
     assert row["league"] == "LPL" and json.loads(row["official_result"]) == {"score": "2:0"}
 
 
-def test_slice_and_stats_and_render_and_rebuild_and_verify(ledger, site_root, capsys):
+def test_slice_and_stats_and_report_and_rebuild_and_verify(ledger, site_root, capsys):
     match_id = ledger.match_id
     assert main(["slice", "--match-id", str(match_id), "--game-no", "1",
                  "--start-ms", str(BASE_TS), "--end-ms", str(BASE_TS + 300_000)]) == 0
@@ -37,29 +37,46 @@ def test_slice_and_stats_and_render_and_rebuild_and_verify(ledger, site_root, ca
     out = capsys.readouterr().out
     assert "G1：55 条" in out and "G2：10 条" in out and "算法版本" in out
 
-    assert main(["render", "--match-id", str(match_id)]) == 0
-    assert "已生成静态页" in capsys.readouterr().out
-    page = site_root / "matches" / f"{match_id}.html"
+    assert main(["report", "--match-id", str(match_id), "--kind", "full"]) == 0
+    report_out = capsys.readouterr().out
+    assert "已发布完整版 v1" in report_out
+    page = site_root / "matches" / str(match_id) / "full.html"
     assert page.exists()
+
+    assert main(["reports", "--match-id", str(match_id)]) == 0
+    assert "full v1｜published" in capsys.readouterr().out
 
     assert main(["rebuild", "--match-id", str(match_id)]) == 0
     assert "AC-13 通过" in capsys.readouterr().out
 
-    assert main(["verify-sources", "--match-id", str(match_id)]) == 0
+    assert main(["verify-sources", "--match-id", str(match_id), "--kind", "full"]) == 0
     assert "全部来源校验通过" in capsys.readouterr().out
 
 
 def test_verify_sources_fails_loudly(ledger, site_root, capsys):
-    main(["render", "--match-id", str(ledger.match_id)])
+    main(["report", "--match-id", str(ledger.match_id), "--kind", "full"])
+    capsys.readouterr()
     path = ledger.data_root / REL_PATH
     path.write_text(path.read_text(encoding="utf-8").replace("弹幕 1", "弹幕 X"), encoding="utf-8")
-    assert main(["verify-sources", "--match-id", str(ledger.match_id)]) == 1
+    assert main(["verify-sources", "--match-id", str(ledger.match_id), "--kind", "full"]) == 1
     assert "来源校验失败" in capsys.readouterr().err
 
 
 def test_verify_sources_without_page(ledger, site_root, capsys):
-    assert main(["verify-sources", "--match-id", str(ledger.match_id)]) == 2
+    assert main(["verify-sources", "--match-id", str(ledger.match_id), "--kind", "full"]) == 2
     assert "页面尚未生成" in capsys.readouterr().err
+
+
+def test_reports_command_without_reports(data_root, conn, capsys):
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    assert main(["reports", "--match-id", "1"]) == 0
+    assert "还没有发布过报告" in capsys.readouterr().out
+
+
+def test_report_command_rejects_unknown_kind(ledger, capsys):
+    assert main(["report", "--match-id", str(ledger.match_id), "--kind", "hourly"]) == 2
+    assert "未注册的报告形态" in capsys.readouterr().err
 
 
 def test_cli_reports_errors(conn, capsys):

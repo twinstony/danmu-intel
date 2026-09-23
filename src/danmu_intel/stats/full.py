@@ -190,6 +190,18 @@ def compute_game(
     return metrics
 
 
+def closing_score(
+    lines: Sequence[RawLine],
+    windows: Sequence[SliceWindow],
+    official_result: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """收局时刻的比分：取最后一局的比分指标（终局判定「比分确认」信号的依据）。"""
+    if not windows:
+        return {}
+    last = windows[-1]
+    return score(score_mentions(select(lines, last)), official_result, game_no=last.game_no)
+
+
 def observed_until(lines: Sequence[RawLine]) -> int | None:
     """观测终点：最后一条原始记录的时刻 +1ms。没有任何记录时返回 None。"""
     if not lines:
@@ -205,6 +217,7 @@ def peak_count(metrics: dict[str, Any]) -> int:
 __all__ = [
     "KILL_LEXICON",
     "SCORE_RE",
+    "closing_score",
     "compute_game",
     "kill_timeline",
     "neutral",

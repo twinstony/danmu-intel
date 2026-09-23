@@ -59,9 +59,10 @@ def test_raw_path_accepts_explicit_data_root(tmp_path):
     assert paths.raw_dir("huya", data_root=tmp_path / "elsewhere") == tmp_path / "elsewhere" / "raw" / "huya"
 
 
-def test_site_dir_and_match_page(site_root):
+def test_site_dir_and_report_page(site_root):
     assert paths.site_dir() == site_root
-    assert paths.match_page_path(7) == site_root / "matches" / "7.html"
+    assert paths.report_page_path(7, "full") == site_root / "matches" / "7" / "full.html"
+    assert paths.report_page_path(7, "live_brief") == site_root / "matches" / "7" / "live_brief.html"
     assert paths.repo_root().name.startswith("danmu-intel")
 
 
@@ -145,6 +146,7 @@ def test_db_creates_all_tables(data_root):
             "matches",
             "metrics",
             "notifications",
+            "reports",
             "room_sessions",
             "rooms",
             "slices",

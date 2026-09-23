@@ -21,13 +21,12 @@ from danmu_intel.common.matches import create_match
 from danmu_intel.pipeline import (
     clear_metrics,
     collect_facts,
+    generate_and_publish,
     metrics_snapshot,
     rebuild_metrics,
-    render_match_page,
     write_gray_signals,
     write_metrics,
 )
-from danmu_intel.report.rule_render import body_gray_signals
 from danmu_intel.slice.manual import add_manual_slice
 from danmu_intel.stats.basic import ALGO_VERSION
 from danmu_intel.stats.gray import STATUS_CANDIDATE, STATUS_DISCARDED
@@ -240,10 +239,16 @@ def test_manual_correction_keeps_old_version_and_recomputes_new(t4_ledger):
 # --------------------------------------------------------------------------- #
 
 
+def _publish_full(conn, match_id, data_root):
+    """走发布钩子发一份完整版，返回页面正文（报告层消费 T4 统计产物的唯一入口）。"""
+    return generate_and_publish(
+        conn, match_id, kind="full", data_root=data_root
+    ).path.read_text(encoding="utf-8")
+
+
 def test_report_renders_samples_without_any_identity(t4_ledger, site_root):
     conn, data_root, match_id = t4_ledger
-    path = render_match_page(conn, match_id, data_root=data_root)
-    html = path.read_text(encoding="utf-8")
+    html = _publish_full(conn, match_id, data_root)
     assert "灰信号汇总" in html
     assert "样本：" in html and "原文「假赛吧」" in html
     assert "不构成对任何个人或队伍的任何指控" in html
@@ -253,25 +258,24 @@ def test_report_renders_samples_without_any_identity(t4_ledger, site_root):
         assert user_hash not in html, "渲染输出中零用户名（需求 §6.5 第 2 条）"
 
 
-def test_render_guard_blocks_identity_leak(data_root, conn):
+def test_render_guard_blocks_identity_leak(data_root, conn, site_root):
     match_id = _ledger(data_root, conn, spam_users=["u1", "u2", "u3"], identity_trap=True)
-    facts = collect_facts(conn, match_id, data_root=data_root)
     with pytest.raises(ValueError, match="禁止输出任何身份标识"):
-        body_gray_signals(facts)
+        generate_and_publish(conn, match_id, kind="full", data_root=data_root)
 
 
 def test_render_marks_not_judged_and_reports_gate(t4_ledger, site_root, monkeypatch):
     conn, data_root, match_id = t4_ledger
     # 把门槛提到不可能达到 → 灰信号全部作废，报告要如实说「未达门槛」
     save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 999})
-    html = render_match_page(conn, match_id, data_root=data_root).read_text(encoding="utf-8")
+    html = _publish_full(conn, match_id, data_root)
     assert "未产出达到门槛的灰信号" in html
     assert "未达证据门槛" not in html or "已按纪律作废" in html
 
 
 def test_render_without_correction_shows_manual_boundary_label(t4_ledger, site_root):
     conn, data_root, match_id = t4_ledger
-    html = render_match_page(conn, match_id, data_root=data_root).read_text(encoding="utf-8")
+    html = _publish_full(conn, match_id, data_root)
     assert "边界来源：人工指定 1 局" in html
     assert "终局判定：已终局" in html
     assert "比分：官方 2:0" in html

@@ -54,8 +54,21 @@ def site_dir() -> Path:
     return Path(override).expanduser() if override else repo_root() / "site"
 
 
-def match_page_path(match_id: int) -> Path:
-    return site_dir() / "matches" / f"{match_id}.html"
+def match_dir(match_id: int) -> Path:
+    return site_dir() / "matches" / str(match_id)
+
+
+def report_page_path(match_id: int, kind: str) -> Path:
+    """一场比赛的一份报告页面：`site/matches/<match_id>/<kind>.html`。
+
+    三形态各占一个文件（快报/完整版/复盘版可同时在线），同场同形态的新版本
+    覆盖旧版本（版本历史在 `reports` 表里，不只靠文件）。
+    """
+    return match_dir(match_id) / f"{kind}.html"
+
+
+def rel_to_site(path: Path) -> str:
+    return path.resolve().relative_to(site_dir().resolve()).as_posix()
 
 
 def rel_to_data(path: Path) -> str:

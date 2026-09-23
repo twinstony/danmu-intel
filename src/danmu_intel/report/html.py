@@ -1,4 +1,4 @@
-"""静态报告页渲染（设计 §10.1 / §11）。
+"""静态报告页渲染（设计 §10.1 / §11）—— 输入是 `ReportContent`，不再碰统计。
 
 一条硬规则：**每一项事实都带可展开的来源**（文件 + 行范围 + SHA256），
 读者可自己复核。事实段与解读段在样式与标注上可区分（需求 §6.9 第 2 条）。
@@ -11,8 +11,18 @@ import re
 from html import escape
 
 from danmu_intel.common.sources import SourceRef
-from danmu_intel.report.facts import MatchFacts
-from danmu_intel.report.segments import KIND_LABELS, KIND_INTERPRETATION, KIND_FACT_INTERPRETATION, Segment
+from danmu_intel.report.assemble import ReportContent
+from danmu_intel.report.forms import form_of
+from danmu_intel.report.rule_render import format_ts
+from danmu_intel.report.segments import Segment
+
+# 段性质（需求 §6.6「内容性质」原文）→ 页面样式类
+NATURE_CLASSES = {
+    "事实": "fact",
+    "事实 + 解读": "fact-interpretation",
+    "解读": "interpretation",
+    "事实（风险提示）": "fact-gray",
+}
 
 CSS = """
 :root { color-scheme: light dark; }
@@ -66,6 +76,11 @@ def parse_sources(html: str) -> list[SourceRef]:
     ]
 
 
+def nature_class(nature: str) -> str:
+    """段性质 → CSS 类名（样式表按性质区分事实段与解读段）。"""
+    return NATURE_CLASSES.get(nature, "fact")
+
+
 def _render_sources(refs: tuple[SourceRef, ...]) -> str:
     if not refs:
         return '<p class="meta">本段没有需要引用的原始记录。</p>'
@@ -86,37 +101,37 @@ def _render_body(body: str) -> str:
 
 
 def _segment_html(segment: Segment) -> str:
-    kind_class = segment.kind.replace("+", "-").replace("(", "-").replace(")", "")
-    label = KIND_LABELS.get(segment.kind, segment.kind)
+    kind_class = nature_class(segment.nature)
     return (
         f'<section class="seg seg--{escape(kind_class)}" id="seg-{segment.no}">'
         f'<h2><span>{segment.no}</span> {escape(segment.title)} '
-        f'<span class="kind kind--{escape(kind_class)}">{escape(label)}</span></h2>'
+        f'<span class="kind kind--{escape(kind_class)}">{escape(segment.nature)}</span></h2>'
         f'<div class="body">{_render_body(segment.body)}</div>'
         f"{_render_sources(segment.sources)}"
         "</section>"
     )
 
 
-def render_html(facts: MatchFacts) -> str:
-    """渲染完整页面。段落由 `build_report` 给出（已保证十一段齐备）。"""
-    from danmu_intel.report.rule_render import build_report, format_ts
-
-    segments = build_report(facts)
-    match = facts.match
-    title = f"{match.league} {match.title} 情报"
+def render_report_html(content: ReportContent) -> str:
+    """渲染完整页面。段落由 `assemble.build_content` 给出（已保证形态段集齐备）。"""
+    form = form_of(content.kind)
+    meta = content.meta
+    title = f"{meta['league']} {meta['match_title']} 情报（{form.label}）"
     toc = "\n".join(
         f'<li><a href="#seg-{segment.no}">{segment.no} {escape(segment.title)}</a></li>'
-        for segment in segments
+        for segment in content.segments
     )
-    body = "\n".join(_segment_html(segment) for segment in segments)
-    meta = (
-        f"{match.league}｜{match.title}｜状态 {match.state}｜"
-        f"弹幕 {len(facts.all_lines)} 条｜算法版本 {facts.algo_version}"
+    body = "\n".join(_segment_html(segment) for segment in content.segments)
+    excluded = meta.get("excluded_games") or []
+    excluded_note = (
+        f"｜未纳入（进行中）：{'、'.join(f'G{no}' for no in excluded)}" if excluded else ""
     )
-    interpretation = [
-        segment for segment in segments if segment.kind in (KIND_INTERPRETATION, KIND_FACT_INTERPRETATION)
-    ]
+    meta_line = (
+        f"{meta['league']}｜{meta['match_title']}｜状态 {meta['state']}｜"
+        f"覆盖节点 {'、'.join(f'G{no}' for no in meta['covered_games']) or '无'}{excluded_note}｜"
+        f"弹幕 {meta['danmu_count']} 条｜算法版本 {meta['algo_version']}"
+    )
+    interpretation = [segment for segment in content.segments if segment.has_interpretation]
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -128,9 +143,10 @@ def render_html(facts: MatchFacts) -> str:
 <body>
 <header>
 <h1>{escape(title)}</h1>
-<p class="meta">{escape(meta)}</p>
-<p class="meta">生成时间 {escape(format_ts(facts.generated_at))}｜
-本页标注「解读」的 {len(interpretation)} 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
+<p class="meta">{escape(meta_line)}</p>
+<p class="meta">报告形态 {escape(form.kind)}｜版本 v{content.version}｜
+生成时间 {escape(format_ts(content.generated_at))}｜事实层哈希 {escape(content.fact_layer_hash)}</p>
+<p class="meta">本页标注「解读」的 {len(interpretation)} 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
 </header>
 <nav class="toc"><ol>
 {toc}
