@@ -178,7 +178,11 @@ def _game_review_facts(facts: MatchFacts, header: ReportHeader) -> str:
 
 
 def _prediction_facts(facts: MatchFacts, header: ReportHeader) -> str:
-    return "本场没有公开发布过的预测记录（预测台账与验证闭环属 T7），因此无可对照项。"
+    return (
+        "本场没有留痕的预测记录：系统里没有「预测」的产出方（段 9 的观察点是回看线索，"
+        "不是可判对错的预测），因此既不做预测，也不做事后追认；站点的验证闭环页公开"
+        "「已发布报告 + 事实层哈希 + 来源复核结果」这三项可复核的东西。"
+    )
 
 
 def _gray_signals(facts: MatchFacts, header: ReportHeader) -> str:

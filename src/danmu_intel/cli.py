@@ -16,6 +16,10 @@
     danmu-intel report --match-id 1 --kind full     # 完整版 → site/matches/1/full.html
     danmu-intel report --match-id 1 --kind review   # 复盘版 → site/matches/1/review.html
     danmu-intel reports --match-id 1                # 已发布的报告版本（FR-C4-9）
+    danmu-intel publish --no-deploy                 # 站点产物 + 7 项检查 + 原子发布（不推 git/Vercel）
+    danmu-intel releases                            # 发布批次账本（版本/指纹/部署/付费比赛）
+    danmu-intel rollback                            # 秒级回滚到上一批（Vercel 即时回滚 + git revert）
+    danmu-intel match set-state --match-id 1 --state ended   # 状态机写入 → 自动再发布公开版
     danmu-intel rebuild --match-id 1                # AC-13：删统计重算，断言结果不变
     danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核 文件+行范围+SHA256
 
@@ -436,10 +440,12 @@ def _cmd_report(args: argparse.Namespace) -> int:
         # 连接关掉之后再查会抛 sqlite3.ProgrammingError，命令在功能启用的当天必崩。
         form = form_of(result.kind)
         print(f"已发布{form.label} v{result.version}：{result.path}")
+        visibility = "公开（比赛已结束）" if result.visibility == "public" else "会员（比赛进行中）"
         print(
             f"  段落 {len(result.content.segments)} 段｜解读层 {result.content.llm_state}｜"
-            f"事实层哈希 {result.content.fact_layer_hash}"
+            f"可见性 {visibility}"
         )
+        print(f"  事实层哈希 {result.content.fact_layer_hash}")
         _print_interpretation_status(interpreter, conn, args.match_id, result.content)
         for item in result.checks:
             print(f"  检查｜{item.label}：{'通过' if item.passed else '未通过'}｜{item.detail}")

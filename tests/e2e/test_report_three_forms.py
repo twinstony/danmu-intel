@@ -28,6 +28,7 @@ from danmu_intel.report.forms import (
     form_of,
 )
 from danmu_intel.report.html import parse_sources
+from danmu_intel.report.publish import PublishRefused
 from danmu_intel.report.segments import SEGMENTS
 
 GENERATED_AT = 1_790_064_400_000
@@ -169,7 +170,14 @@ def test_published_pages_freeze_resolvable_sources(three_game_ledger, site_root)
     ledger = three_game_ledger
     brief, full, review = publish_all_three(ledger)
 
-    for result in (brief, full, review):
+    # 比赛进行中的快报是付费页：静态产物里没有正文，也就没有来源引用（ADR-0015 决策 3）
+    assert brief.visibility == "paid"
+    assert parse_sources(brief.path.read_text(encoding="utf-8")) == []
+    assert "G1 弹幕" not in brief.path.read_text(encoding="utf-8")
+
+    # 赛后形态（比赛已结束）是公开页：来源逐项冻结在产物里
+    for result in (full, review):
+        assert result.visibility == "public"
         page_refs = parse_sources(result.path.read_text(encoding="utf-8"))
         assert page_refs, f"{result.kind} 页面上必须能取到来源引用"
         assert {ref.rel_path for ref in page_refs} == {ledger.rel_path}
@@ -183,19 +191,21 @@ def test_published_pages_freeze_resolvable_sources(three_game_ledger, site_root)
             (ref.rel_path, ref.line_start, ref.line_end, ref.sha256) for ref in page_refs
         } <= content_refs
 
-    # 快报的引用只覆盖已完成节点的行范围，完整版覆盖全文件
-    brief_refs = parse_sources(brief.path.read_text(encoding="utf-8"))
-    assert max(ref.line_end for ref in brief_refs) == 24 + 12
+    # 快报（账本里）的引用只覆盖已完成节点的行范围，完整版覆盖全文件
+    assert max(ref.line_end for segment in brief.content.segments for ref in segment.sources) == 24 + 12
     full_refs = parse_sources(full.path.read_text(encoding="utf-8"))
     assert max(ref.line_end for ref in full_refs) == 24 + 12 + 8
 
-    # 原始记录被改动后，每个形态都能当场发现（校验的是产物里冻结的哈希）
+    # 原始记录被改动后，公开页当场发现（校验的是产物里冻结的哈希）；
+    # 付费页没有正文可对，但它的来源检查在**发布时**守着：改动后再发布必被拒绝。
     raw = ledger.data_root / ledger.rel_path
     raw.write_text(raw.read_text(encoding="utf-8").replace("G1 弹幕 5", "G1 弹幕 X"), encoding="utf-8")
-    for kind in KINDS:
+    for kind in ("full", "review"):
         failed = verify_sources(ledger.match_id, kind=kind, data_root=ledger.data_root)
         assert failed, f"{kind} 必须能发现原始记录被改过"
         assert {ref.rel_path for ref in failed} == {ledger.rel_path}
+    with pytest.raises(PublishRefused):
+        publish(ledger, "live_brief", completed_games=ledger.completed_games)
 
 
 def test_cli_publishes_three_forms_and_lists_versions(three_game_ledger, site_root, capsys):

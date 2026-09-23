@@ -3,6 +3,10 @@
 一条硬规则：**每一项事实都带可展开的来源**（文件 + 行范围 + SHA256），
 读者可自己复核。事实段与解读段在样式与标注上可区分（需求 §6.9 第 2 条）。
 无外部脚本、无外部字体、无第三方请求（NFR-A-2 / NFR-P-3）。
+
+第二条硬规则（ADR-0009 / ADR-0015）：**付费页面上没有任何段正文**。
+`visibility` 由调用方按比赛状态机给出（`common/paywall.py`），付费时只渲染标题、
+元信息、段目与付费说明 —— 正文一个字节都不进静态产物。
 """
 
 from __future__ import annotations
@@ -10,6 +14,7 @@ from __future__ import annotations
 import re
 from html import escape
 
+from danmu_intel.common import paywall
 from danmu_intel.common.sources import SourceRef
 from danmu_intel.report.assemble import ReportContent
 from danmu_intel.report.forms import LLM_STATE_LLM, form_of
@@ -23,6 +28,9 @@ NATURE_CLASSES = {
     "解读": "interpretation",
     "事实（风险提示）": "fact-gray",
 }
+
+# 付费页面上的段落样式类（无正文）
+LOCKED_CLASS = "locked"
 
 CSS = """
 :root { color-scheme: light dark; }
@@ -52,6 +60,10 @@ code { word-break: break-all; font-size: 12px; }
 footer { color: #666; font-size: 13px; padding: 16px 0 32px; }
 .degraded { margin: 12px 0 0; padding: 10px 12px; border-radius: 6px;
   background: #fffaf0; border: 1px solid #f6ad55; color: #7b341e; font-weight: 600; }
+.locked { margin: 12px 0 0; padding: 10px 12px; border-radius: 6px;
+  background: #edf2f7; border: 1px solid #a0aec0; color: #2d3748; font-weight: 600; }
+.seg--locked { border-left: 4px solid #a0aec0; }
+.kind--locked { background: #edf2f7; color: #2d3748; }
 """
 
 
@@ -102,20 +114,38 @@ def _render_body(body: str) -> str:
     return "\n".join(f"<p>{part}</p>" for part in paragraphs if part)
 
 
-def _segment_html(segment: Segment) -> str:
-    kind_class = nature_class(segment.nature)
-    return (
-        f'<section class="seg seg--{escape(kind_class)}" id="seg-{segment.no}">'
+def _segment_html(segment: Segment, *, locked: bool) -> str:
+    kind_class = LOCKED_CLASS if locked else nature_class(segment.nature)
+    head = (
         f'<h2><span>{segment.no}</span> {escape(segment.title)} '
         f'<span class="kind kind--{escape(kind_class)}">{escape(segment.nature)}</span></h2>'
+    )
+    if locked:
+        # 正文与来源都不渲染：静态产物里装不下付费正文（ADR-0015 决策 3）
+        return (
+            f'<section class="seg seg--{LOCKED_CLASS}" id="seg-{segment.no}">{head}'
+            f'<p class="locked">{escape(paywall.PAYWALL_MARK)}（本段 {escape(segment.nature)}）：'
+            "会员凭凭据可读全文；该场比赛结束后本页自动转公开。"
+            "</section>"
+        )
+    return (
+        f'<section class="seg seg--{escape(kind_class)}" id="seg-{segment.no}">'
+        f"{head}"
         f'<div class="body">{_render_body(segment.body)}</div>'
         f"{_render_sources(segment.sources)}"
         "</section>"
     )
 
 
-def render_report_html(content: ReportContent) -> str:
-    """渲染完整页面。段落由 `assemble.build_content` 给出（已保证形态段集齐备）。"""
+def render_report_html(content: ReportContent, *, visibility: str) -> str:
+    """渲染完整页面。段落由 `assemble.build_content` 给出（已保证形态段集齐备）。
+
+    `visibility` 必填：调用方必须显式说明这页是公开还是付费（`paywall.visibility(比赛状态)`）。
+    缺省成公开会让「忘了按状态机判定」变成静默泄漏，因此不设缺省值。
+    """
+    if visibility not in paywall.VISIBILITIES:
+        raise ValueError(f"未知的可见性：{visibility}（允许：{','.join(paywall.VISIBILITIES)}）")
+    locked = visibility == paywall.VISIBILITY_PAID
     form = form_of(content.kind)
     meta = content.meta
     title = f"{meta['league']} {meta['match_title']} 情报（{form.label}）"
@@ -123,7 +153,7 @@ def render_report_html(content: ReportContent) -> str:
         f'<li><a href="#seg-{segment.no}">{segment.no} {escape(segment.title)}</a></li>'
         for segment in content.segments
     )
-    body = "\n".join(_segment_html(segment) for segment in content.segments)
+    body = "\n".join(_segment_html(segment, locked=locked) for segment in content.segments)
     excluded = meta.get("excluded_games") or []
     excluded_note = (
         f"｜未纳入（进行中）：{'、'.join(f'G{no}' for no in excluded)}" if excluded else ""
@@ -134,6 +164,15 @@ def render_report_html(content: ReportContent) -> str:
         f"弹幕 {meta['danmu_count']} 条｜算法版本 {meta['algo_version']}"
     )
     interpretation = [segment for segment in content.segments if segment.has_interpretation]
+    match_label = f"{meta['league']} {meta['match_title']}"
+    lock_banner = (
+        f'<p class="locked">{escape(paywall.PAYWALL_MARK)}：{escape(match_label)} 的{form.label}'
+        "在该场比赛结束前只向会员提供；比赛结束后本页（含全部节点页）自动转为公开。"
+        "正文与来源不写入静态页面。"
+        "</p>"
+        if locked
+        else ""
+    )
     degraded = content.llm_state != LLM_STATE_LLM
     note = str(meta.get("llm_note") or "")
     banner = (
@@ -143,6 +182,7 @@ def render_report_html(content: ReportContent) -> str:
         if degraded
         else ""
     )
+    visibility_label = "公开" if not locked else "会员（付费）"
     return f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -155,9 +195,10 @@ def render_report_html(content: ReportContent) -> str:
 <header>
 <h1>{escape(title)}</h1>
 <p class="meta">{escape(meta_line)}</p>
-<p class="meta">报告形态 {escape(form.kind)}｜版本 v{content.version}｜
+<p class="meta">报告形态 {escape(form.kind)}｜版本 v{content.version}｜可见性 {visibility_label}｜
 生成时间 {escape(format_ts(content.generated_at))}｜事实层哈希 {escape(content.fact_layer_hash)}</p>
 <p class="meta">本页标注「解读」的 {len(interpretation)} 段是分析而非事实；标注「事实」的段落逐项附来源。</p>
+{lock_banner}
 {banner}
 </header>
 <nav class="toc"><ol>
