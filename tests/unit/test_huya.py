@@ -20,7 +20,7 @@ from danmu_intel.collect.huya import (
     register_payload,
 )
 
-from conftest import HUYA_FRAMES, load_huya_fixture
+from conftest import HUYA_FRAMES, load_fixture
 
 FAKE_WS_MSG_TYPE = type(
     "FakeWSMsgType", (), {"BINARY": "binary", "CLOSE": "close", "CLOSED": "closed", "ERROR": "error"}
@@ -145,7 +145,7 @@ def test_decode_frame_skips_blank_text():
 
 
 def test_recorded_fixture_is_sanitized_and_replayable():
-    records = load_huya_fixture()
+    records = load_fixture("huya")
     kinds = {record["kind"] for record in records}
     assert kinds == {"danmaku", "other", "garbage"}
     danmaku = [record for record in records if record["kind"] == "danmaku"]
@@ -172,7 +172,7 @@ def _nickname_of(frame: bytes) -> str:
 
 def test_fixture_is_sanitized():
     """脱敏纪律：只保留帧结构，真实 uid / 昵称 / 用户原话都不进仓库。"""
-    records = load_huya_fixture()
+    records = load_fixture("huya")
     danmaku = [record for record in records if record["kind"] == "danmaku"]
     assert all(int(record["uid"]) >= 1_000_001 for record in danmaku)
     assert all(record["text"].startswith("样例弹幕") for record in danmaku)
@@ -250,7 +250,7 @@ class FakeTransport:
 
 
 def _danmaku_frames(limit: int = 4) -> list[bytes]:
-    records = [r for r in load_huya_fixture() if r["kind"] == "danmaku"][:limit]
+    records = [r for r in load_fixture("huya") if r["kind"] == "danmaku"][:limit]
     return [bytes.fromhex(r["frame_hex"]) for r in records]
 
 

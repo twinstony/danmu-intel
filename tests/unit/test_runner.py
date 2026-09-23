@@ -21,7 +21,7 @@ from danmu_intel.common import paths
 from danmu_intel.common.events import decode_line, iter_events
 from danmu_intel.common.db import open_db
 
-from conftest import BASE_TS, load_huya_fixture
+from conftest import BASE_TS, load_fixture
 
 ROOM = RoomKey("huya", "660000", "https://www.huya.com/660000")
 HOUR = 3_600_000
@@ -215,7 +215,7 @@ def test_run_session_with_huya_replay_adapter(data_root, monkeypatch):
     """真实适配器 + 录制帧：验证「适配器 → 落盘」这一段也是通的（仍不连网络）。"""
     from tests.contract.test_adapter_contract import ReplayTransport
 
-    frames = [bytes.fromhex(r["frame_hex"]) for r in load_huya_fixture() if r["kind"] == "danmaku"]
+    frames = [bytes.fromhex(r["frame_hex"]) for r in load_fixture("huya") if r["kind"] == "danmaku"]
     adapter = HuyaAdapter(transport=ReplayTransport([frames]))
     monkeypatch.setattr("danmu_intel.collect.adapter.RECONNECT_BACKOFF_S", (0.0,))
 

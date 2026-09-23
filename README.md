@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2）
+## 当前能力（T1+T2+T3）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**静态页。
@@ -15,7 +15,11 @@
 60 秒重连、无首条消息 120 秒 `no_stream`、进程被杀/僵死自动拉起（退避 1s→60s，
 30 分钟内重启超 5 次停止重试并留因）、磁盘可用 < 5GB 报警、每房间贡献量可查。
 
-不含 LLM、付费墙、公网发布、多平台、后台（见设计 §19 实施分层）。
+**T3**：**SOOP 平台适配器**接入（ADR-0008 首发第二平台）。适配器只做
+「平台原始 payload → `DanmuEvent`」；接入新平台 = 新增一个模块 + 注册表加一行，
+同一套契约测试同时覆盖两个平台（`tests/contract/test_adapter_contract.py`）。
+
+不含 LLM、付费墙、公网发布、Twitch/KICK（注册表留位）、后台（见设计 §19 实施分层）。
 
 ## 安装
 
@@ -33,6 +37,10 @@ danmu-intel match add --league LPL --team-a iG --team-b LNG --state ended \
 
 # ② 采集真实弹幕（seconds 省略则持续采集到 Ctrl-C）
 danmu-intel collect --url https://www.huya.com/660000 --seconds 300 --match-id 1
+
+# ②-2 SOOP 也一样，只把平台换成 soop（房间标识 = 主播频道）
+danmu-intel collect --platform soop --url https://play.sooplive.com/afchall --seconds 300 \
+  --match-id 1
 
 # ②' 多房间并发采集 + 监督（一房间一子进程；seconds 省略则跑到所有房间停下）
 danmu-intel supervise --match-id 1 --seconds 1800 \
@@ -71,6 +79,19 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
   三个确实在解说同一场比赛的直播间），然后用 `health`/`contribution` 逐房间核对条数、
   时间跨度与去重后条数——三房间互不为子集，合计不等于任一房间的条数。
 
+### 平台适配器（T3）
+
+平台差异全在各自的适配器模块里（`collect/huya.py` / `collect/soop.py`）：
+
+| 平台 | 房间标识 | 弹幕链路 | 探测 |
+|---|---|---|---|
+| 虎牙 | 房间号（`lProfileRoom`） | `wss://cdnws.api.huya.com/`（Tars 帧） | 公开移动页字段 |
+| SOOP | 主播频道 `bj_id`（`broad_no` 每场都变，不能当房间主键） | `wss://chat-<IP 十六进制>.sooplive.com:<CHPT+1>`（自研二进制包：登录 → 进频道 → 弹幕） | `player_live_api` 的 `CHANNEL` 报价 |
+
+两个适配器共用同一套重连、落盘、建库逻辑：适配器只管「平台原始 payload → `DanmuEvent`」，
+`socket` 级断流/报错/静默 60 秒都由 `collect/adapter.py` 的 `reconnecting` 接手重连，
+并把原因回调给会话层（累计 `reconnects`、标 `stalled`）。
+
 ## 数据落点
 
 | 内容 | 位置 | 进 git 吗 |
@@ -87,15 +108,30 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 5 分钟真实采集后生成的样例产物；它引用的原始记录在采集机的数据目录里，
 换一台机器跑 `danmu-intel render` 会用当地数据重新生成。
 
+`~/danmu-intel-data/raw/soop/2026-09-23/seokwngud-00.jsonl` 是 T3 验收的真实采集：
+SOOP `seokwngud` 频道连采 5.5 分钟（会话 #5，329 条弹幕，落盘 437 条），
+只存 `user_hash`，不落明文身份。
+
 ## 测试
 
 ```bash
 pytest          # 覆盖率门禁 90%；全程不连外网（平台数据用录制帧回放）
 ```
 
-平台数据的回放 fixture 由 `tools/record_fixtures.py` 生成：先 `record` 连真实
-直播间录原始帧，再 `sanitize` 把身份与原文替换成样例值后写入
-`tests/fixtures/huya/frames.jsonl`（录制帧文件本身不进仓库）。
+平台数据的回放 fixture 由 `tools/record_fixtures.py` 生成（`--platform huya|soop`）：先
+`record` 连真实直播间录原始帧，再 `sanitize` 把身份与原文替换成样例值后写入
+`tests/fixtures/<平台>/frames.jsonl`（录制帧文件本身不进仓库）：
+
+```bash
+python3 tools/record_fixtures.py record   --platform soop \
+  --url https://play.sooplive.com/seokwngud --seconds 120 --dump .frames-dump/seokwngud.jsonl
+python3 tools/record_fixtures.py sanitize --platform soop \
+  --dump .frames-dump/seokwngud.jsonl --out tests/fixtures/soop/frames.jsonl
+```
+
+适配器契约测试（`tests/contract/test_adapter_contract.py`）**对注册表里的每个平台**
+跑同一套断言（字段齐备、时间单调、非法 payload 不崩、断流触发重连）；
+新增平台只需加一行注册 + 每个平台一行接线（回放工厂/适配器工厂/探测桩/样例链接）。
 
 采集监督的测试缝在 `tests/unit/test_supervisor.py`（假时钟 + 假子进程 + 真心跳）；
 `tests/e2e/test_supervisor_processes.py` 另外用**真进程**跑三个房间，验证
