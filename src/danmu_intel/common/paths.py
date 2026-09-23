@@ -33,6 +33,16 @@ def salt_path() -> Path:
     return data_dir() / "salt"
 
 
+def env_path() -> Path:
+    """凭据文件（`.env`，0600，**仓库外**，永不进 git —— 设计 §14.4 / NFR-S-4）。
+
+    放数据目录（默认 `~/danmu-intel-data/.env`）而不是仓库目录：仓库里的任何文件
+    都可能被误提交，而数据目录整个在仓库之外（`.gitignore` 只为防手滑留了 `.env` 一条）。
+    测试用 `DANMU_INTEL_DATA` 指向临时目录，因此凭据天然隔离。
+    """
+    return data_dir() / ".env"
+
+
 def raw_dir(platform: str, *, data_root: Path | None = None) -> Path:
     return (data_root or data_dir()) / "raw" / platform
 
