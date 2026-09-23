@@ -4,7 +4,7 @@
 断流触发重连。新增平台只需加一行注册 + 一行回放工厂，这套断言自动覆盖
 「新增平台不得改动已有平台逻辑」。
 
-回放用 `tests/fixtures/huya/frames.jsonl`（真实录制 + 脱敏），**不连真实直播**。
+回放用 `tests/fixtures/<平台>/frames.jsonl`（真实录制 + 脱敏），**不连真实直播**。
 """
 
 from __future__ import annotations
@@ -15,12 +15,13 @@ from typing import AsyncIterator, Callable
 
 import pytest
 
-from danmu_intel.collect import ADAPTERS
+from danmu_intel.collect import ADAPTERS, soop
 from danmu_intel.collect.adapter import Adapter, RoomKey
 from danmu_intel.collect.huya import HuyaAdapter
+from danmu_intel.collect.soop import SoopAdapter
 from danmu_intel.common.events import JSONL_FIELDS
 
-from conftest import load_huya_fixture
+from conftest import load_fixture
 
 RECONNECT_BACKOFF = (0.0,)
 
@@ -46,8 +47,8 @@ class Replay:
     transport: ReplayTransport
 
 
-def _fixture_frames(kind: str) -> list[bytes]:
-    return [bytes.fromhex(record["frame_hex"]) for record in load_huya_fixture() if record["kind"] == kind]
+def _fixture_frames(platform: str, kind: str) -> list[bytes]:
+    return [bytes.fromhex(record["frame_hex"]) for record in load_fixture(platform) if record["kind"] == kind]
 
 
 def _huya_replay(frames: list[bytes]) -> Replay:
@@ -55,17 +56,80 @@ def _huya_replay(frames: list[bytes]) -> Replay:
     return Replay(HuyaAdapter(transport=transport), transport)
 
 
-# 每个平台一行：平台标识 → 用回放帧构造适配器的工厂
-REPLAY_FACTORIES: dict[str, Callable[[list[bytes]], Replay]] = {"huya": _huya_replay}
+def _soop_replay(frames: list[bytes]) -> Replay:
+    transport = ReplayTransport([frames])
+    return Replay(SoopAdapter(transport=transport), transport)
 
-SAMPLE_URLS = {"huya": "https://www.huya.com/660000"}
 
-pytestmark = pytest.mark.parametrize("platform", sorted(ADAPTERS))
+def _as_huya(transport) -> Adapter:
+    return HuyaAdapter(transport=transport)
+
+
+def _as_soop(transport) -> Adapter:
+    return SoopAdapter(transport=transport)
+
+
+# 每个平台一行：平台标识 → 用回放帧构造适配器 / 用给定 transport 构造适配器的工厂
+REPLAY_FACTORIES: dict[str, Callable[[list[bytes]], Replay]] = {"huya": _huya_replay, "soop": _soop_replay}
+ADAPTER_FACTORIES: dict[str, Callable[[object], Adapter]] = {"huya": _as_huya, "soop": _as_soop}
+
+SAMPLE_URLS = {
+    "huya": "https://www.huya.com/660000",
+    "soop": "https://play.sooplive.com/seokwngud/297306971",
+}
+
+HUYA_PROBE_PAGE = "".join(
+    [
+        '"lProfileRoom":660000,"lYyid":1,"lChannelId":2,"lSubChannelId":2,',
+        '"eLiveStatus":2,"sNick":"样例主播","sRoomName":"标题","sGameFullName":"英雄联盟"',
+    ]
+)
+SOOP_PROBE_PAYLOAD = {
+    "CHANNEL": {
+        "BJID": "seokwngud",
+        "BNO": "297306971",
+        "CHATNO": "2679",
+        "CHIP": "222.233.54.81",
+        "CHPT": "9000",
+        "BSTATUS": "BROADING",
+        "BJNICK": "样例主播",
+        "TITLE": "标题",
+        "CATEGORY_TAGS": ["리그 오브 레전드"],
+    }
+}
+
+
+def _stub_huya_probe(monkeypatch) -> None:
+    async def fake_page(room_id: str) -> str:
+        return HUYA_PROBE_PAGE
+
+    monkeypatch.setattr("danmu_intel.collect.huya.fetch_page", fake_page)
+
+
+def _stub_soop_probe(monkeypatch) -> None:
+    async def fake_room_info(bj_id: str):
+        return soop.parse_room_info(SOOP_PROBE_PAYLOAD)
+
+    monkeypatch.setattr("danmu_intel.collect.soop.fetch_room_info", fake_room_info)
+
+
+# 每个平台一行：平台标识 → 探测接口的桩（房间元数据来自平台公开接口）
+PROBE_STUBS: dict[str, Callable[[object], None]] = {"huya": _stub_huya_probe, "soop": _stub_soop_probe}
+
+@pytest.fixture(params=sorted(ADAPTERS))
+def platform(request) -> str:
+    """每个注册平台跑一遍同一套断言（新增平台自动被覆盖）。"""
+    return request.param
 
 
 @pytest.fixture(autouse=True)
 def fast_reconnect(monkeypatch):
     monkeypatch.setattr("danmu_intel.collect.adapter.RECONNECT_BACKOFF_S", RECONNECT_BACKOFF)
+
+
+def test_registry_is_first_wave_platforms():
+    """首发平台 = 虎牙 + SOOP（ADR-0008）；注册表是唯一的接入点。"""
+    assert sorted(ADAPTERS) == ["huya", "soop"]
 
 
 def _collect(
@@ -85,6 +149,9 @@ def _collect(
 def test_registry_covers_replay_factories(platform):
     """契约测试必须覆盖注册表里的每个平台（新平台漏配回放工厂会在这里失败）。"""
     assert platform in REPLAY_FACTORIES, f"平台 {platform} 未配置回放工厂"
+    assert platform in ADAPTER_FACTORIES, f"平台 {platform} 未配置适配器工厂"
+    assert platform in PROBE_STUBS, f"平台 {platform} 未配置探测桩"
+    assert platform in SAMPLE_URLS, f"平台 {platform} 未配置样例链接"
     assert ADAPTERS[platform].platform == platform
 
 
@@ -98,7 +165,7 @@ def test_parse_room_returns_platform_room_key(platform):
 
 
 def test_stream_yields_complete_events_and_monotonic_ts(platform, data_root):
-    frames = _fixture_frames("danmaku")
+    frames = _fixture_frames(platform, "danmaku")
     replay = REPLAY_FACTORIES[platform](frames)
     room = replay.adapter.parse_room(SAMPLE_URLS[platform])
 
@@ -119,8 +186,8 @@ def test_stream_yields_complete_events_and_monotonic_ts(platform, data_root):
 
 def test_stream_survives_illegal_payloads(platform, data_root):
     """非法/无关 payload 不得中断事件流（不崩、不丢后续）。"""
-    good = _fixture_frames("danmaku")[:3]
-    garbage = _fixture_frames("garbage") + _fixture_frames("other")
+    good = _fixture_frames(platform, "danmaku")[:3]
+    garbage = _fixture_frames(platform, "garbage") + _fixture_frames(platform, "other")
     replay = REPLAY_FACTORIES[platform](garbage + good)
     room = replay.adapter.parse_room(SAMPLE_URLS[platform])
 
@@ -129,11 +196,10 @@ def test_stream_survives_illegal_payloads(platform, data_root):
 
 
 def test_stream_reconnects_after_disconnect(platform, data_root):
-    frames = _fixture_frames("danmaku")
+    frames = _fixture_frames(platform, "danmaku")
     half = len(frames) // 2
     transport = ReplayTransport([frames[:half], frames[half:]])
-    adapter: Adapter = HuyaAdapter(transport=transport)
-    assert platform in ADAPTERS  # 契约对每个注册平台都成立
+    adapter = ADAPTER_FACTORIES[platform](transport)
     room = adapter.parse_room(SAMPLE_URLS[platform])
 
     events = _collect(adapter, room, len(frames))
@@ -159,10 +225,9 @@ class BrokenTransport:
 
 def test_stream_reports_reconnect_reason(platform, data_root):
     """重连必须把原因回调给采集器（T2 靠它累计 `reconnects` 并把会话标成 `stalled`）。"""
-    frames = _fixture_frames("danmaku")
+    frames = _fixture_frames(platform, "danmaku")
     half = len(frames) // 2
-    adapter: Adapter = HuyaAdapter(transport=BrokenTransport(frames[:half], frames[half:]))
-    assert platform in ADAPTERS
+    adapter = ADAPTER_FACTORIES[platform](BrokenTransport(frames[:half], frames[half:]))
     room = adapter.parse_room(SAMPLE_URLS[platform])
 
     reasons: list[str] = []
@@ -173,17 +238,8 @@ def test_stream_reports_reconnect_reason(platform, data_root):
 
 def test_probe_returns_probe_shape(platform, monkeypatch):
     adapter = ADAPTERS[platform]
-    page = "".join(
-        [
-            '"lProfileRoom":660000,"lYyid":1,"lChannelId":2,"lSubChannelId":2,',
-            '"eLiveStatus":2,"sNick":"样例主播","sRoomName":"标题","sGameFullName":"英雄联盟"',
-        ]
-    )
-
-    async def fake_page(room_id: str) -> str:
-        return page
-
-    monkeypatch.setattr("danmu_intel.collect.huya.fetch_page", fake_page)
+    PROBE_STUBS[platform](monkeypatch)
     probe = asyncio.run(adapter.probe(adapter.parse_room(SAMPLE_URLS[platform])))
     assert isinstance(probe.is_live, bool)
     assert probe.streamer == "样例主播"
+    assert probe.title == "标题"

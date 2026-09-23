@@ -21,6 +21,8 @@ from danmu_intel.slice.manual import add_manual_slice
 
 FIXTURES = Path(__file__).parent / "fixtures"
 HUYA_FRAMES = FIXTURES / "huya" / "frames.jsonl"
+SOOP_FRAMES = FIXTURES / "soop" / "frames.jsonl"
+PLATFORM_FRAMES = {"huya": HUYA_FRAMES, "soop": SOOP_FRAMES}
 
 # 固定时间基准（避免测试依赖当前时间）
 BASE_TS = 1_790_064_000_123
@@ -214,5 +216,7 @@ def three_game_ledger(data_root, conn) -> ThreeGameLedger:
     )
 
 
-def load_huya_fixture() -> list[dict]:
-    return [json.loads(line) for line in HUYA_FRAMES.read_text(encoding="utf-8").splitlines() if line.strip()]
+def load_fixture(platform: str) -> list[dict]:
+    """读某个平台的脱敏录制帧（契约测试与适配器单测共用）。"""
+    path = PLATFORM_FRAMES[platform]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]

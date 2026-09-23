@@ -11,7 +11,7 @@ from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
 from danmu_intel.common.events import count_lines
 
-from conftest import BASE_TS, REL_PATH, load_huya_fixture
+from conftest import BASE_TS, REL_PATH, load_fixture
 
 
 def test_parser_requires_subcommand():
@@ -95,7 +95,7 @@ def test_collect_command_with_replay_adapter(data_root, monkeypatch, capsys):
     from tests.contract.test_adapter_contract import ReplayTransport
     from danmu_intel.collect.huya import HuyaAdapter
 
-    frames = [bytes.fromhex(r["frame_hex"]) for r in load_huya_fixture() if r["kind"] == "danmaku"]
+    frames = [bytes.fromhex(r["frame_hex"]) for r in load_fixture("huya") if r["kind"] == "danmaku"]
     adapter = HuyaAdapter(transport=ReplayTransport([frames]))
     monkeypatch.setattr("danmu_intel.collect.ADAPTERS", {"huya": adapter})
     monkeypatch.setattr("danmu_intel.collect.adapter.RECONNECT_BACKOFF_S", (60.0,))
