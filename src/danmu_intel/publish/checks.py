@@ -183,21 +183,24 @@ def check_paywall_correct(build: SiteBuild) -> CheckResult:
                 f"{page.path} 的可见性 {page.visibility} 与比赛状态 {state} 的判定 {expected} 不符"
             )
             continue
+        if expected == paywall.VISIBILITY_PUBLIC:
+            # 应公开的无付费墙：比赛已结束，该场的任何页面都不许再挂付费说明
+            if paywall.PAYWALL_MARK in page.html:
+                problems.append(f"{page.path} 的比赛已结束，但页面上仍有付费墙")
+            if not page.is_report:
+                continue
+            missing = [marker for marker in _body_markers(page, build) if marker not in page.html]
+            if missing:
+                problems.append(f"{page.path} 是公开页，但缺 {len(missing)} 段正文")
+            continue
         if not page.is_report:
             continue
         markers = _body_markers(page, build)
-        if expected == paywall.VISIBILITY_PAID:
-            if paywall.PAYWALL_MARK not in page.html:
-                problems.append(f"{page.path} 该受付费墙保护，但页面上没有付费墙")
-            leaked = [marker for marker in markers if marker in page.html]
-            if leaked:
-                problems.append(f"{page.path} 是付费页却写了 {len(leaked)} 段正文")
-            continue
-        if paywall.PAYWALL_MARK in page.html:
-            problems.append(f"{page.path} 的比赛已结束，但页面上仍有付费墙")
-        missing = [marker for marker in markers if marker not in page.html]
-        if missing:
-            problems.append(f"{page.path} 是公开页，但缺 {len(missing)} 段正文")
+        if paywall.PAYWALL_MARK not in page.html:
+            problems.append(f"{page.path} 该受付费墙保护，但页面上没有付费墙")
+        leaked = [marker for marker in markers if marker in page.html]
+        if leaked:
+            problems.append(f"{page.path} 是付费页却写了 {len(leaked)} 段正文")
     if problems:
         return CheckResult("paywall_correct", "付费墙正确", False, "；".join(problems[:4]))
     paid = sum(1 for page in build.tree.pages if page.visibility == paywall.VISIBILITY_PAID)

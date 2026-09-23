@@ -190,6 +190,38 @@ def test_paywall_check_rejects_a_page_that_stays_locked_after_the_match_ended(bu
     assert not result.passed and "仍有付费墙" in result.detail and "缺" in result.detail
 
 
+def test_paywall_check_rejects_a_locked_match_page_after_the_match_ended(build):
+    """比赛结束后该场**任何**页面都不许再挂付费墙：比赛页也一样，不只是报告页。"""
+    match_path = "matches/1/index.html"
+    assert paywall.PAYWALL_MARK in build.tree.page(match_path).html, "前提：比赛进行中，比赛页是锁着的"
+    ended = replace(
+        build,
+        facts=replace(
+            build.facts,
+            matches=tuple(
+                replace(match, state="ended") if match.id == 1 else match
+                for match in build.facts.matches
+            ),
+        ),
+    )
+    # 可见性跟着状态机改了，但比赛页上的付费说明没撤掉
+    stale = replace(
+        ended,
+        tree=replace(
+            ended.tree,
+            pages=tuple(
+                replace(page, visibility=paywall.VISIBILITY_PUBLIC)
+                if page.path == match_path
+                else page
+                for page in ended.tree.pages
+            ),
+        ),
+    )
+    result = one(stale, "paywall_correct")
+    assert not result.passed
+    assert f"{match_path} 的比赛已结束，但页面上仍有付费墙" in result.detail
+
+
 # —— ④ 报告分段完整 ——
 
 
