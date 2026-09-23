@@ -32,6 +32,7 @@ from danmu_intel.publish.site import (
     parse_identifier,
     resolve_identifier,
 )
+from danmu_intel.report.forms import form_of
 from danmu_intel.report.publish import (
     CheckResult,
     check_interpretation_present,
@@ -212,8 +213,6 @@ def check_paywall_correct(build: SiteBuild) -> CheckResult:
 
 
 def check_report_segments(build: SiteBuild) -> CheckResult:
-    from danmu_intel.report.forms import form_of
-
     problems: list[str] = []
     for material in build.facts.reports:
         form = form_of(material.kind)

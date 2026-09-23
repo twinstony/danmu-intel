@@ -28,7 +28,7 @@ import subprocess
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Callable, Mapping, Protocol, Sequence
+from typing import Callable, Collection, Mapping, Protocol, Sequence
 
 from danmu_intel.common import audit, notifications, paths
 from danmu_intel.common.matches import get_match
@@ -236,6 +236,7 @@ def stage_tree(tree: SiteTree, site_root: Path) -> Path:
 
 
 def _live_entries(site_root: Path) -> set[str]:
+    """线上现有条目（不含暂存目录）。"""
     return {
         path.relative_to(site_root).as_posix()
         for path in site_root.rglob("*")
@@ -249,18 +250,31 @@ def _prune_empty_dirs(site_root: Path) -> None:
             path.rmdir()
 
 
-def swap_into_place(staging: Path, site_root: Path) -> None:
-    """逐条目原子替换：先换页面，再删线上多出来的，最后写 `release.json`。"""
+def swap_into_place(
+    staging: Path, site_root: Path, *, managed: Collection[str] = ()
+) -> None:
+    """逐条目原子替换：先换页面，再删**上一批产物里多出来的**条目。
+
+    只清理自己发过的条目（`managed` = 上一批的页面清单 + `release.json`）：
+    运维手工放在 `site/` 里的东西（`vercel.json`、`robots.txt` …）不是发布器的产物，
+    发布器无权删掉它们。
+    """
     staged = {
         path.relative_to(staging).as_posix() for path in staging.rglob("*") if path.is_file()
     }
-    stale = _live_entries(site_root) - staged
+    live = _live_entries(site_root)
+    # 有上一批清单就按清单清（人工放的文件不在清单里，因此不会被误删）；
+    # 没有任何批次记录时 site/ 显然就是发布器的产物，按整棵树清理。
+    stale = (set(managed) if managed else live) - staged
+    stale &= live
     for rel_path in sorted(staged):
         target = site_root / rel_path
         target.parent.mkdir(parents=True, exist_ok=True)
         os.replace(staging / rel_path, target)
     for rel_path in sorted(stale, reverse=True):
-        (site_root / rel_path).unlink()
+        target = site_root / rel_path
+        if target.exists():
+            target.unlink()
     shutil.rmtree(staging, ignore_errors=True)
     _prune_empty_dirs(site_root)
 
@@ -445,8 +459,9 @@ def publish_site(
         )
 
     version = next_version(conn)
+    managed = (set(live.pages) if live is not None else set()) | {VERSION_FILE}
     staging = stage_tree(build.tree, ctx.site_root)
-    swap_into_place(staging, ctx.site_root)
+    swap_into_place(staging, ctx.site_root, managed=managed)
     write_version_file(
         ctx.site_root,
         {
@@ -597,6 +612,8 @@ def _rollback_target(
         if row is None:
             raise VercelError(f"线上批次 v{live.version} 之前没有可回滚的批次")
         target = _to_release(row)
+    if target.version == live.version:
+        raise VercelError(f"批次 v{target.version} 就是线上版本，无需回滚")
     if not target.deployment_id:
         raise VercelError(f"批次 v{target.version} 没有部署标识，无法回滚到它")
     return target

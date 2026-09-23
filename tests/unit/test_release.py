@@ -256,17 +256,31 @@ def test_failed_publish_leaves_no_staging_behind(ledger, ctx):
     assert not (ctx.site_root / "index.html").exists()
 
 
-def test_stale_pages_are_removed_from_the_live_tree(ledger, ctx):
+def test_operator_files_in_the_site_dir_are_left_alone(ledger, ctx):
+    """`site/` 里运维手工放的文件（vercel.json、robots.txt）不是发布器的产物，不该被删。"""
+    keep = ctx.site_root / "vercel.json"
+    keep.parent.mkdir(parents=True, exist_ok=True)
+    keep.write_text('{"cleanUrls": true}', encoding="utf-8")
     publish_reports(ledger)
     publish_site(ledger.conn, ctx=ctx, generated_at=GENERATED_AT)
-    stale = ctx.site_root / "old-template.html"
-    stale.write_text("旧页面", encoding="utf-8")
-
-    # 让树变一下（新发一份复盘版），再发布：线上多出来的条目要被删掉
     publish_reports(ledger, kinds=("full",))
     publish_site(ledger.conn, ctx=ctx, generated_at=GENERATED_AT + 1000)
-    assert not stale.exists()
-    assert (ctx.site_root / "matches/1/full.html").exists()
+    assert keep.read_text(encoding="utf-8") == '{"cleanUrls": true}'
+
+
+def test_pages_dropped_from_the_tree_are_removed_from_the_live_tree(ledger, ctx):
+    publish_reports(ledger)
+    publish_site(ledger.conn, ctx=ctx, generated_at=GENERATED_AT)
+    dropped = ctx.site_root / report_page_path(ledger.match_id, "live_brief")
+    assert dropped.exists()
+
+    # 报告从账本里下线 → 新树里没有这一页 → 发布时把它从线上删掉
+    ledger.conn.execute("UPDATE reports SET state='failed' WHERE kind='live_brief'")
+    ledger.conn.commit()
+    outcome = publish_site(ledger.conn, ctx=ctx, generated_at=GENERATED_AT + 1000)
+    assert outcome.version == 2
+    assert not dropped.exists()
+    assert (ctx.site_root / "index.html").exists()
 
 
 # —— AC-2：结束转公开 ——
@@ -376,6 +390,8 @@ def test_rollback_refuses_when_there_is_nothing_to_go_back_to(ledger, ctx):
         rollback(ledger.conn, ctx=ctx)
     with pytest.raises(VercelError):
         rollback(ledger.conn, ctx=ctx, to_version=99)
+    with pytest.raises(VercelError):
+        rollback(ledger.conn, ctx=ctx, to_version=1)  # 已经是线上版本
 
 
 def test_rollback_refuses_without_a_deployment_id(ledger, ctx):
