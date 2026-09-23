@@ -403,6 +403,36 @@ def test_rollback_refuses_without_a_deployment_id(ledger, ctx):
         rollback(ledger.conn, ctx=local)
 
 
+def test_publish_reports_a_push_failure_instead_of_pretending(ledger, ctx):
+    publish_reports(ledger)
+
+    class FailingPublisher(type(ctx.publisher)):  # type: ignore[misc]
+        def publish(self, site_root, *, version):
+            raise RuntimeError("git push 被拒绝")
+
+    failed_ctx = replace(ctx, publisher=FailingPublisher(ctx.site_root))
+    with pytest.raises(RuntimeError):
+        publish_site(ledger.conn, ctx=failed_ctx, generated_at=GENERATED_AT)
+    assert current_release(ledger.conn) is None, "没提交成功就不该有线上批次"
+    pending = ledger.conn.execute("SELECT kind, severity FROM notifications").fetchall()
+    assert [(row["kind"], row["severity"]) for row in pending] == [("release.failed", "critical")]
+
+
+def test_publish_survives_when_the_deployment_cannot_be_read(ledger, ctx):
+    """读不到部署号不影响上线（Vercel 自己会构建），但这一批没法被即时回滚到 → 报警。"""
+    publish_reports(ledger)
+
+    class BrokenVercel(FakeVercel):
+        def latest(self):
+            raise VercelError("HTTP 500")
+
+    broken = replace(ctx, vercel=BrokenVercel())
+    outcome = publish_site(ledger.conn, ctx=broken, generated_at=GENERATED_AT)
+    assert outcome.changed and outcome.release.deployment_id is None
+    pending = ledger.conn.execute("SELECT kind, severity FROM notifications").fetchall()
+    assert [(row["kind"], row["severity"]) for row in pending] == [("release.deploy_unknown", "warning")]
+
+
 # —— 本地模式与部署等待 ——
 
 

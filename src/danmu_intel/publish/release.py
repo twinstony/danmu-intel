@@ -49,6 +49,7 @@ ACTION_PUBLISH = "release.publish"
 ACTION_ROLLBACK = "release.rollback"
 ACTION_PUBLISH_FAILED = "release.failed"
 KIND_PUBLISH_FAILED = "release.failed"
+KIND_DEPLOY_UNKNOWN = "release.deploy_unknown"
 KIND_RECONCILE_FAILED = "release.reconcile_failed"
 
 
@@ -473,8 +474,43 @@ def publish_site(
             "paywalled_matches": list(paywalled),
         },
     )
-    deploy_ref = ctx.publisher.publish(ctx.site_root, version=version)
-    deployment = await_deployment(ctx, deploy_ref)
+    try:
+        deploy_ref = ctx.publisher.publish(ctx.site_root, version=version)
+    except Exception as exc:
+        # 提交/推送失败：本地条目已换，但线上没动（Vercel 由 git 触发构建）→ 报警并中止
+        notifications.emit(
+            conn,
+            KIND_PUBLISH_FAILED,
+            severity="critical",
+            payload={
+                "release": version,
+                "reason": reason,
+                "error": str(exc),
+                "hint": "产物已换到本地目录，但没有提交/推送；线上仍是上一版",
+            },
+            timestamp=stamp,
+        )
+        audit.record(
+            conn,
+            actor=ctx.actor,
+            action=ACTION_PUBLISH_FAILED,
+            target=str(version),
+            detail={"error": str(exc), "reason": reason, "stage": "publish"},
+            ts=stamp,
+        )
+        raise
+    try:
+        deployment = await_deployment(ctx, deploy_ref)
+    except VercelError as exc:
+        # 部署号读不到不影响上线（Vercel 自己会构建），但这一批暂时没法被「即时回滚到」→ 报警
+        deployment = None
+        notifications.emit(
+            conn,
+            KIND_DEPLOY_UNKNOWN,
+            severity="warning",
+            payload={"release": version, "error": str(exc), "deploy_ref": deploy_ref},
+            timestamp=stamp,
+        )
     if live is not None:
         conn.execute("UPDATE releases SET state=? WHERE id=?", (STATE_SUPERSEDED, live.id))
     release = _insert_release(
