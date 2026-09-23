@@ -445,7 +445,7 @@ def test_interpreter_for_reads_credentials_from_the_env_file(ledger, data_root, 
     assert interpreter.prompt_set.version == "v1"
 
 
-def test_interpreter_for_refuses_inscure_env_file(ledger, data_root, monkeypatch):
+def test_interpreter_for_refuses_an_insecure_env_file(ledger, data_root, monkeypatch):
     monkeypatch.delenv(API_KEY_NAME, raising=False)
     target = data_root / ".env"
     target.write_text(f"{API_KEY_NAME}={FAKE_KEY}\n", encoding="utf-8")
