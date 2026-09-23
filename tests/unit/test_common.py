@@ -138,7 +138,10 @@ def test_db_creates_all_tables(data_root):
     conn = open_db(paths.db_path())
     try:
         assert table_names(conn) == [
+            "audit_log",
+            "config",
             "danmu_segments",
+            "gray_signals",
             "matches",
             "metrics",
             "notifications",

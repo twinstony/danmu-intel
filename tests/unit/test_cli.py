@@ -208,3 +208,101 @@ def test_events_prints_incidents(data_root, conn, capsys):
 def test_events_reports_empty(data_root, capsys):
     assert main(["events"]) == 0
     assert "没有采集异常事件" in capsys.readouterr().out
+
+
+def test_boundaries_resolves_and_records_conflict(ledger, capsys):
+    """切片引擎命令：官方优先级最高，冲突照样打印出来。"""
+    ledger.conn.execute(
+        "UPDATE matches SET official_result=? WHERE id=?",
+        (json.dumps({"score": "2:0", "games": [{"game_no": 1, "start_ms": BASE_TS,
+                                                "end_ms": BASE_TS + 300_000}]}), ledger.match_id),
+    )
+    ledger.conn.commit()
+    capsys.readouterr()
+    assert main(["boundaries", "--match-id", str(ledger.match_id),
+                 "--report-window", f"1:{BASE_TS + 60_000}:{BASE_TS + 300_000}"]) == 0
+    out = capsys.readouterr().out
+    assert "已写入 G1" in out and "边界来源 official" in out
+    assert "冲突：" in out and "report_window" in out
+    rows = ledger.conn.execute("SELECT * FROM slices ORDER BY game_no").fetchall()
+    assert [(row["game_no"], row["boundary_source"]) for row in rows] == [(1, "official"), (2, "manual")]
+
+
+def test_boundaries_dry_run_writes_nothing(ledger, capsys):
+    ledger.conn.execute("DELETE FROM slices")
+    ledger.conn.commit()
+    capsys.readouterr()
+    assert main(["boundaries", "--match-id", str(ledger.match_id), "--dry-run",
+                 "--report-window", f"1:{BASE_TS}:{BASE_TS + 10_000}"]) == 0
+    assert "试算 G1" in capsys.readouterr().out
+    assert ledger.conn.execute("SELECT COUNT(*) AS n FROM slices").fetchone()["n"] == 0
+
+
+def test_boundaries_without_any_candidate(ledger, capsys):
+    ledger.conn.execute("DELETE FROM slices")
+    ledger.conn.commit()
+    capsys.readouterr()
+    assert main(["boundaries", "--match-id", str(ledger.match_id)]) == 0
+    assert "没有可用的小局边界候选" in capsys.readouterr().out
+
+
+def test_boundaries_rejects_bad_report_window(ledger, capsys):
+    capsys.readouterr()
+    assert main(["boundaries", "--match-id", str(ledger.match_id), "--report-window", "1:2"]) == 2
+    assert "格式应为" in capsys.readouterr().err
+
+
+def test_final_and_gray_and_config_commands(ledger, capsys):
+    capsys.readouterr()
+    assert main(["final", "--match-id", str(ledger.match_id)]) == 0
+    out = capsys.readouterr().out
+    assert "终局判定：live" in out and "本场没有任何一类独立信号成立" in out
+
+    assert main(["gray", "--match-id", str(ledger.match_id)]) == 0
+    out = capsys.readouterr().out
+    assert "没有达到门槛的灰信号" in out
+    assert "灰信号门槛（config）：命中 ≥5 次" in out
+    assert "不提供对外导出" in out
+
+    assert main(["config"]) == 0
+    assert "gray_min_users = 3" in capsys.readouterr().out
+
+    assert main(["config", "--set", "gray_min_users=7", "--actor", "管理员"]) == 0
+    out = capsys.readouterr().out
+    assert "已更新统计门槛" in out and "gray_min_users = 7" in out
+    assert ledger.conn.execute("SELECT COUNT(*) AS n FROM audit_log WHERE action='config.update'").fetchone()["n"] == 1
+
+    assert main(["config", "--set", "不存在的键=1"]) == 2
+    assert "未知的统计配置项" in capsys.readouterr().err
+    assert main(["config", "--set", "bad-format"]) == 2
+    assert "格式应为 key=value" in capsys.readouterr().err
+
+
+def test_gray_command_reports_discarded_with_reason(data_root, conn, capsys):
+    from danmu_intel.common.matches import create_match
+    from danmu_intel.slice.manual import add_manual_slice
+    from conftest import BASE_TS as BASE, REL_PATH as REL, make_event, write_jsonl
+
+    events = [make_event(BASE + index * 100, text="假赛吧", user="u1") for index in range(20)]
+    digest = write_jsonl(data_root / REL, events)
+    match_id = create_match(conn, league="LPL", team_a="iG", team_b="LNG", state="ended")
+    conn.execute(
+        "INSERT INTO rooms(platform, room_id, url, discovered_by) VALUES('huya', '660000', 'u', 'manual')"
+    )
+    conn.execute(
+        "INSERT INTO room_sessions(room_id, match_id, pid, started_at, state) VALUES(1, ?, 1, ?, 'exited')",
+        (match_id, BASE),
+    )
+    conn.execute(
+        "INSERT INTO danmu_segments(room_session_id, rel_path, sha256, first_ts, last_ts, msg_count, sealed_at) "
+        "VALUES(1, ?, ?, ?, ?, ?, ?)",
+        (REL, digest, events[0].ts, events[-1].ts, len(events), BASE),
+    )
+    conn.commit()
+    add_manual_slice(conn, match_id=match_id, game_no=1, start_ms=BASE, end_ms=BASE + 60_000)
+    capsys.readouterr()
+    assert main(["gray", "--match-id", str(match_id)]) == 0
+    out = capsys.readouterr().out
+    assert "没有达到门槛的灰信号" in out
+    assert "已作废：假赛——未达证据门槛" in out
+    assert "u1" not in out, "命令行输出里也不得出现身份标识"

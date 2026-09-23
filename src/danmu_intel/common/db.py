@@ -4,6 +4,9 @@
 `danmu_segments` / `slices` / `metrics` 六张；T2 加 `notifications`（采集异常事件
 的出口，投递由 T11 接）。
 
+T4 加 `gray_signals`（灰信号，含类别与作废原因）、`audit_log`（人工修正留痕）、
+`config`（统计门槛，改动留审计）。
+
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
 """
@@ -62,6 +65,23 @@ CREATE TABLE IF NOT EXISTS notifications(      -- 待投递事件（采集异常
   payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
   state TEXT NOT NULL,           -- pending|delivered|dropped_expired|failed
   delivered_at INTEGER, channel TEXT, attempts INTEGER NOT NULL DEFAULT 0);
+
+CREATE TABLE IF NOT EXISTS gray_signals(       -- 灰信号（风险提示，不含指控）
+  id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL,
+  category TEXT NOT NULL,        -- 类别（需求 FR-C3-3：cheat_suspicion|betting|…）
+  keyword TEXT NOT NULL, hit_count INTEGER NOT NULL, distinct_users INTEGER NOT NULL,
+  window_count INTEGER NOT NULL, samples_json TEXT NOT NULL,  -- 必须附样本（需求 §6.5 第 3 条）
+  status TEXT NOT NULL,          -- candidate|escalated|discarded
+  reason TEXT,                   -- 作废/降级原因（不达标必须留原因）
+  created_at INTEGER NOT NULL, evaluated_at INTEGER);
+
+CREATE TABLE IF NOT EXISTS audit_log(          -- 一切人工/自动写操作留痕
+  id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT NOT NULL,
+  action TEXT NOT NULL, target TEXT, detail_json TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS config(             -- 后台可视化配置（≤60s 生效）
+  key TEXT PRIMARY KEY, value_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL);
 """
 
 

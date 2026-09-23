@@ -15,7 +15,9 @@ from datetime import datetime
 from danmu_intel.common.sources import SourceRef, refs_for_lines
 from danmu_intel.report.facts import GameFacts, MatchFacts
 from danmu_intel.report.segments import Segment, build_segments
+from danmu_intel.stats import final as final_signals
 from danmu_intel.stats.basic import RawLine
+from danmu_intel.stats.gray import contains_identity
 
 BOUNDARY_LABELS = {
     "official": "官方时间",
@@ -89,15 +91,46 @@ def body_match_info(facts: MatchFacts) -> str:
     return "\n".join(lines)
 
 
+def _final_phrase(facts: MatchFacts) -> str:
+    judgement = facts.final_judgement
+    if judgement.verdict == final_signals.VERDICT_FINAL:
+        return (
+            f"终局判定：已终局（{format_ts(judgement.satisfied_at_ms)} 起满足 "
+            f"{len(judgement.kinds)} 类独立信号，{format_ts(judgement.decided_at_ms)} 确认无反转）"
+        )
+    if judgement.verdict == final_signals.VERDICT_REVOKED:
+        return f"终局判定：曾判定、已撤销（{judgement.reason}）"
+    return f"终局判定：未判定终局（{judgement.reason}）"
+
+
+def _score_phrase(facts: MatchFacts) -> str:
+    if not facts.games:
+        return "比分：无小局切片，无法归属比分"
+    score = facts.games[-1].metrics.get("score") or {}
+    if not score.get("official"):
+        return "比分：官方未回填（设计 §20 O8 官方数据源）"
+    tail = f"；{score['discrepancy']}" if score.get("discrepancy") else ""
+    return f"比分：官方 {score['official']}（口径 {score['official_scope']}，弹幕提及 {score['mentions']} 条）{tail}"
+
+
 def body_result_overview(facts: MatchFacts) -> str:
     match = facts.match
     result = match.official_result or {}
     lines = [
         f"官方结果：{result.get('score', '未回填')}（来源：人工登记；官方数据源接入见设计 §20 O8）",
-        f"小局切片：{len(facts.games)} 局（边界来源：人工指定）",
+        _score_phrase(facts),
+        f"小局切片：{len(facts.games)} 局（边界来源：{_boundary_summary(facts)}）",
+        _final_phrase(facts),
     ]
     lines.extend(_game_line(game) for game in facts.games)
     return "\n".join(lines)
+
+
+def _boundary_summary(facts: MatchFacts) -> str:
+    counts: dict[str, int] = {}
+    for game in facts.games:
+        counts[game.window.boundary_source] = counts.get(game.window.boundary_source, 0) + 1
+    return "、".join(f"{BOUNDARY_LABELS.get(source, source)} {count} 局" for source, count in sorted(counts.items()))
 
 
 def body_game_review(facts: MatchFacts) -> str:
@@ -141,12 +174,44 @@ def body_player_profile(facts: MatchFacts) -> str:
 
 
 def body_gray_signals(facts: MatchFacts) -> str:
-    return (
-        "本场规则统计层未产出灰信号（灰信号识别属 T4，本票未接入）。\n"
+    """灰信号汇总（需求 §6.5 的 6 条硬约束在渲染层的落点）。
+
+    硬约束 2「不指控、不点名」：本函数出口前会逐一比对全部 `user_hash`，
+    只要正文里出现任何一个，立即抛错 —— **渲不出来比渲出来强**。
+    """
+    config = facts.stats_config
+    reportable_signals = facts.reportable_gray_signals
+    lines = [
+        "风险提示：以下内容是弹幕里出现的**讨论聚集现象**，只作风险提示，"
+        "不构成对任何个人或队伍的任何指控，也不代表比赛存在任何问题。",
+    ]
+    if not reportable_signals:
+        lines.append(f"本场未产出达到门槛的灰信号（门槛：命中 ≥{config.gray_min_hits} 次、"
+                     f"独立发言者 ≥{config.gray_min_users} 人、覆盖 ≥{config.gray_min_windows} 个时段）。")
+    for signal in reportable_signals:
+        lines.append(
+            f"【{signal.category_label}】关键词「{signal.keyword}」：命中 {signal.hit_count} 条｜"
+            f"独立发言者 {signal.distinct_users} 人｜覆盖 {signal.window_count} 个时段｜状态 {signal.status}"
+        )
+        for sample in signal.samples:
+            lines.append(f"  样本：{format_ts(sample.ts)}｜原文「{sample.text}」（{sample.rel_path} 第 {sample.line_no} 行）")
+    if facts.gray_signals:
+        discarded = len(facts.gray_signals) - len(reportable_signals)
+        lines.append(
+            f"另有 {discarded} 个关键词命中未达证据门槛，已按纪律作废并留原因（不进报告）。"
+            if discarded
+            else "所有关键词命中均达到证据门槛。"
+        )
+    lines.append(
         "纪律（需求 §6.5）：灰信号只作风险提示，不出现指控性结论、不指名个人或队伍、"
         "必须附样本（时间 + 原文片段）、必须满足多人多时段的证据门槛；"
-        "不达门槛即作废并留原因。本报告不含任何指控。"
+        "不达门槛即作废并留原因；不得用于任何勒索、威胁或交易，也不提供对外导出。"
     )
+    body = "\n".join(lines)
+    leaked = contains_identity(body, {line.event.user_hash for line in facts.all_lines})
+    if leaked:
+        raise ValueError(f"灰信号渲染层禁止输出任何身份标识（需求 §6.5 第 2 条）：{len(leaked)} 处命中")
+    return body
 
 
 def body_league_patterns(facts: MatchFacts) -> str:

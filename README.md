@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3）
+## 当前能力（T1+T2+T3+T4）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**静态页。
@@ -18,6 +18,11 @@
 **T3**：**SOOP 平台适配器**接入（ADR-0008 首发第二平台）。适配器只做
 「平台原始 payload → `DanmuEvent`」；接入新平台 = 新增一个模块 + 注册表加一行，
 同一套契约测试同时覆盖两个平台（`tests/contract/test_adapter_contract.py`）。
+
+**T4**：**切片引擎**（官方 > 弹幕信号 > 报告窗口，冲突必记录；弹幕候选需 **≥2 类独立
+信号**复核；人工修正必带操作者与理由、落审计、算法版本递增）+ **统计全集**（密度曲线 /
+峰值 / 低谷 / 比分交叉校验 / 击杀时间轴 / 中立指标）+ **终局判定**（≥3 类独立信号同时
+成立且 2 分钟无反转）+ **灰信号**（多人多时段门槛、必附样本、渲染层零身份、不提供导出）。
 
 不含 LLM、付费墙、公网发布、Twitch/KICK（注册表留位）、后台（见设计 §19 实施分层）。
 
@@ -48,11 +53,20 @@ danmu-intel supervise --match-id 1 --seconds 1800 \
   --room https://www.huya.com/323444 \
   --room https://www.huya.com/11342412
 
-# ③ 人工指定这一局的起止（毫秒时间戳，可从落盘记录里取）
-danmu-intel slice --match-id 1 --game-no 1 --start-ms 1790064000123 --end-ms 1790064300123
+# ③ 切片引擎：按优先级裁决小局边界（官方 > 弹幕信号 > 报告窗口），冲突必记录
+danmu-intel boundaries --match-id 1                       # 用官方数据 + 弹幕信号复核
+danmu-intel boundaries --match-id 1 --dry-run \
+  --report-window 1:1790064000123:1790064300123           # 回填已发布报告窗口（只试算）
+
+# ③' 人工修正（覆盖已有边界必须给操作者与理由；落审计、算法版本递增）
+danmu-intel slice --match-id 1 --game-no 1 \
+  --start-ms 1790064000123 --end-ms 1790064300123 \
+  --override-by 管理员 --override-reason 对齐官方开赛时间
 
 # ④ 规则统计 → ⑤ 十一段静态页
-danmu-intel stats  --match-id 1
+danmu-intel stats  --match-id 1          # 统计全集 + 终局判定 + 灰信号落库
+danmu-intel final  --match-id 1          # 终局判定明细（信号、首次满足时刻、是否反转）
+danmu-intel gray   --match-id 1          # 灰信号（只作风险提示，输出里没有任何身份）
 danmu-intel render --match-id 1          # → site/matches/1.html
 
 # ⑥ 自检
@@ -60,6 +74,19 @@ danmu-intel verify-sources --match-id 1  # 逐项复核来源（文件 + 行范�
 danmu-intel rebuild        --match-id 1  # AC-13：删统计后重算，结果必须逐字节相同
 python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资产凭据
 ```
+
+### 统计门槛怎么调（T4）
+
+门槛（灰信号 N/M/K、终局信号阈值、边界复核门槛）都在 `config` 表，改动留审计：
+
+```bash
+danmu-intel config                                          # 看当前门槛
+danmu-intel config --set gray_min_users=5 --actor 管理员     # 改门槛（写 config.update 审计）
+```
+
+默认值取自需求原文：灰信号命中 ≥5 次 / 独立发言者 ≥3 人 / 覆盖 ≥2 个时段（§6.5 第 4 条
+「多人、多时段」）；终局判定 ≥3 类独立信号 + 2 分钟反转窗口、终结类弹幕持续 ≥2 分钟、
+流量降至峰值一成以下 ≥5 分钟（§6.4）。
 
 ### 采集状态怎么看（T2）
 
@@ -141,4 +168,8 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 
 - 公开弹幕是唯一数据来源，不使用任何需要突破访问限制的手段。
 - 原始记录**不落明文身份**：只存平台用户 ID 的加盐哈希（`user_hash`）。
-- 灰信号只作风险提示，不指控、不点名、必须附样本与门槛（需求 §6.5）。
+- 灰信号只作风险提示，不指控、不点名、必须附样本与门槛（需求 §6.5）：产出物结构上装不下
+  身份字段，渲染层出口前逐一比对全部 `user_hash`（出现即抛错），样本非空是落库前置校验，
+  且**不提供任何对外导出接口**。
+- 切片边界的来源与冲突都留档：`slices.boundary_source` + `conflict_note`；人工修正进
+  `audit_log`，且自动来源永不覆盖人工修正过的切片（需求 FR-C2-5）。
