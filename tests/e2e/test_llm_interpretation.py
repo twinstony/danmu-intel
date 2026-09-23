@@ -169,8 +169,10 @@ def test_hallucinated_output_is_refused_and_never_reaches_the_page(ledger, site_
     assert result.content.llm_state == LLM_STATE_RULE
     # 每段"调用 + 重试 1 次"，连丢三次不合格即全局降级，剩下的段不再白花钱
     assert fake.calls == 4
-    assert "含事实层之外的内容" in (result.content.meta["llm_note"] or "")
-    assert "全局降级" in (result.content.meta["llm_note"] or "")
+    note = str(result.content.meta["llm_note"])
+    assert "引入事实层之外" in note and "全局降级" in note
+    # 公开页面上的降级说明不能出现模型编造的内容本身
+    assert "3:0" not in note and "Faker" not in note and "T1" not in note
 
     rejected = [row for row in llm_ledger.calls_for_match(ledger.conn, ledger.match_id) if row.outcome == llm_ledger.OUTCOME_REJECTED]
     assert len(rejected) == 4

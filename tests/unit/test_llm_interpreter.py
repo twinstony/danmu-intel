@@ -159,9 +159,13 @@ def test_hallucination_is_retried_once_and_then_degrades(ledger, facts):
     assert len(client.calls) == 2  # 重试 1 次
     assert text == interpretation_text(3, facts)  # 规则直出兜底
     assert interpreter.state == LLM_STATE_RULE
-    assert "第 3 段重试后仍含事实层之外的内容" in interpreter.note
+    assert "第 3 段重试后仍不合格" in interpreter.note
+    assert "引入事实层之外的" in interpreter.note and "比分" in interpreter.note
+    # 降级原因会进公开页面：不能把模型编造的比分/名字搬到页面上
+    assert "3:0" not in interpreter.note and "Faker" not in interpreter.note
 
     rows = llm_ledger.calls_for_match(ledger.conn, ledger.match_id)
+    assert "Faker" in (rows[0].reason or "")  # 原文只进账本
     assert [row.outcome for row in rows] == [llm_ledger.OUTCOME_REJECTED, llm_ledger.OUTCOME_REJECTED]
     assert "3:0" in (rows[0].reason or "") and "Faker" in (rows[0].reason or "")
     assert rows[0].cost_cny > 0  # 被拒的调用照样花了钱，账本要如实记

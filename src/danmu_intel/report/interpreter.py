@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from danmu_intel.report.facts import MatchFacts
-from danmu_intel.report.forms import LLM_STATE_LLM, LLM_STATE_RULE
+from danmu_intel.report.forms import LLM_STATE_RULE
 from danmu_intel.report.rule_render import interpretation_text
 from danmu_intel.report.segments import SegmentSpec
 

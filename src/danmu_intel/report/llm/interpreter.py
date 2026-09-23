@@ -32,7 +32,6 @@ from danmu_intel.report.llm import alerts, ledger
 from danmu_intel.report.llm.client import (
     DEFAULT_BASE_URL,
     DeepSeekClient,
-    LLMError,
     LLMProtocolError,
     LLMReply,
     LLMTimeout,
@@ -48,7 +47,7 @@ from danmu_intel.report.llm.cost import (
     price_for,
 )
 from danmu_intel.report.llm.prompts import PROMPT_VERSION, PromptSet, load_prompt_set, render_user
-from danmu_intel.report.llm.verify import correction_note, describe, verify_text
+from danmu_intel.report.llm.verify import LABELS, correction_note, describe, verify_text
 from danmu_intel.report.rule_render import interpretation_text
 from danmu_intel.report.segments import SegmentSpec
 
@@ -134,6 +133,7 @@ class LLMInterpreter:
             return None
 
         correction = ""
+        failure = ""
         for attempt in (1, 2):
             remaining = self._remaining_s()
             if remaining < MIN_CALL_S:
@@ -147,7 +147,8 @@ class LLMInterpreter:
             try:
                 text = parse_segment_text(reply.text, segment_no=spec.no)
             except LLMProtocolError as exc:
-                self._reject(spec, match_id, reply, str(exc), attempt=attempt)
+                failure = str(exc)
+                self._reject(spec, match_id, reply, failure, attempt=attempt)
                 correction = (
                     "上一次输出不符合约定：必须是 JSON 对象，键正好是本次要求的段号，"
                     "正文非空。请只输出那个 JSON。\n"
@@ -157,15 +158,14 @@ class LLMInterpreter:
             if not violations:
                 self._record(match_id, spec.no, outcome=ledger.OUTCOME_OK, reply=reply)
                 return text
-            self._reject(
-                spec,
-                match_id,
-                reply,
-                f"含事实层之外的内容：{describe(violations)}",
-                attempt=attempt,
-            )
+            failure = f"含事实层之外的内容：{describe(violations)}"
+            self._reject(spec, match_id, reply, failure, attempt=attempt)
+            # 降级原因会进**公开页面**：只写违规的类别，不写编造出来的数字/名字
+            #（否则读者会在"降级说明"里读到一个模型瞎编的比分）。原文只进账本。
+            kinds_label = "、".join(sorted({LABELS[item.kind] for item in violations}))
+            failure = f"引入事实层之外的{kinds_label}"
             correction = correction_note(violations)
-        self._degrade(f"第 {spec.no} 段重试后仍含事实层之外的内容，该段规则直出")
+        self._degrade(f"第 {spec.no} 段重试后仍不合格（{failure}），该段规则直出")
         return None
 
     def _preflight(self, match_id: int) -> str | None:
