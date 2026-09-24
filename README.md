@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5+T6+T7）
+## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -44,7 +44,17 @@ Vercel 构建；任一项不过就一个条目都不换，线上保持上一版�
 `git revert` 跟进对齐账本）；比赛结束**自动**再发布公开版（幂等）；**付费正文不进静态产物**
 （付费页只有标题、段目与付费说明，正文只经凭据 API 返回）。
 
-不含会员付费闭环、通知投递、后台、站点统计（见设计 §19 实施分层）。
+**T8**：**链上监听** —— Polygon 走 **Polygonscan**（Etherscan V2 多链 API，原生币 + ERC20）、
+Solana 走 **Helius**（`getSignaturesForAddress` + `getTransaction`，带每单唯一 `memo`）：
+**一个收款地址一个游标**（`chain_cursors`，Polygon 区块号只前进、Solana 签名只在处理完
+新记录时推），**启动补扫 + 每 60 秒增量轮询**，两条路径互为兜底（**故意漏掉一笔，事后补扫照样能
+发现它**）；**每次调用都记 `quota_usage`**（成功与失败都记），用量 **>80%** 或撞**限速**一律写
+`critical` 待投递报警而不是静默重试（投递属 T11）；`danmu-intel chain-usage` 随时看当日/当月
+用量、上限、限速与「扫到哪了」。链上数据里只有地址、交易、金额与 memo —— **没有任何可动用
+资产的凭据**（不持有私钥/助记词，API key 只从仓库外 `.env` 读，不进日志与异常消息）。
+
+不含会员付费闭环、通知投递、后台、站点统计（见设计 §19 实施分层）。订单匹配与自助开通（T9）
+消费本层的 `Transfer`，本层不碰订单。
 
 ## 安装
 
@@ -102,7 +112,13 @@ danmu-intel releases                 # 发布批次账本：版本/指纹/提交
 danmu-intel match set-state --match-id 1 --state ended   # 状态机写入即触发公开版再发布
 danmu-intel rollback                 # 回滚到上一批（Vercel 即时回滚 + git revert 跟进）
 
-# ⑨ 自检
+# ⑨ 链上监听（Polygonscan + Helius；启动补扫 → 每 60 秒增量轮询，两路径互为兜底）
+danmu-intel chain-watch --polygon-address 0x… --solana-address 5x…   # 长驻监听（Ctrl-C 停）
+danmu-intel chain-watch --polygon-address 0x… --once    # 补扫 + 一轮增量后退出（cron 友好）
+danmu-intel chain-watch --solana-address 5x… --rescan   # 只做一次补扫（按地址查全历史，不依赖游标）
+danmu-intel chain-usage                                 # 额度：当日/当月用量、上限、限速 + 监听游标
+
+# ⑩ 自检
 danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核来源（文件 + 行范围 + SHA256）
 danmu-intel rebuild        --match-id 1  # AC-13：删统计后重算，结果必须逐字节相同
 python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资产凭据
@@ -186,6 +202,38 @@ printf 'VERCEL_TOKEN=%s\nVERCEL_PROJECT_ID=%s\n' '你的 token' '你的项目 id
   >> ~/danmu-intel-data/.env      # 可选：VERCEL_TEAM_ID、VERCEL_API_BASE
 ```
 
+### 链上监听怎么看（T8）
+
+- **两条独立路径互为兜底**（ADR-0005 / ADR-0016）：`poll` 从该地址的游标往后扫（日常）；
+  `rescan` **不看游标**、直接按地址查全历史（启动补扫、异常恢复、手动补扫）。所以「游标坏了、
+  跳了、被别的地址的入账越过了」都还能把那笔重新摆到桌面上 —— AC-5 的「故意漏掉一笔，事后补扫
+  能发现它」就是这么验的（`tests/e2e/test_chain_watch.py`）。
+- **游标管到地址一级**（`chain_cursors(network, scope=地址)`），不按链存一个全局游标：多地址
+  共用一个游标时，一个地址的入账会被另一个地址推进的游标越过去。Polygon 的游标是「已处理到的
+  最新入账区块」且**只前进不回退**；Solana 游标是「已处理的最新签名」（签名没有可用的大小序，
+  夹不住，只能靠「真的处理完才写」保证单调）。**没扫到东西就不推游标** —— 不假装进度。
+- **额度与限速**（FR-C6-11）：账本按供应商按日累加（`quota_usage`），**每一次打出去的请求都
+  记**（成功与失败、包括被限速的那次）。上限窗口不同就如实不同：Polygonscan 日 10 万 calls
+  （5 calls/s）、Helius 月 100 万 credits（10 req/s）。**用量 >80%** 或**撞限速**都写一条
+  `critical` 待投递报警（`danmu-intel events` 可查，投递属 T11），**不静默退避重试** ——
+  「这段时间看不见链上」本身就是必须让人知道的事实。同一窗口同类告警只报一次（去重），
+  恢复正常后再出问题会重新报（重启后也会再报一次，那正是「这件事还在吗」的答案）。
+- **翻页有上限，撞上限是报警而不是给半截**：一次扫描最多 1 万条记录（`MAX_PAGES × PAGE_SIZE`）。
+  翻满上限且还有剩就报错 → 报警且**游标不动**，下轮重来；宁可停下，也不把半截历史当成全部
+  （把没取回的那段越过去就是静默漏检）。
+- **金额一律是最小单位整数**（wei / lamports / 代币最小单位），与 `orders.amount_due_units`
+  同一口径；一笔入账是统一的 `Transfer`（`network/address/tx_ref/asset/units/at_ms/memo/block`），
+  订单匹配（T9）只看这一个形状。Solana 的 `memo` 是每单唯一标识（ADR-0004）。
+- **零资金风险面**（AC-12 / FR-C6-17..19）：监听层只**看见**入账 —— 代码里没有私钥、没有助记词、
+  没有任何签名能力；API key 只从仓库外 `.env`（0600）读，只进查询参数，异常与日志里只有状态码
+  与供应商原文。
+
+```bash
+# 仓库外 .env 里放供应商凭据（0600；绝不入 git；也可放进同一个文件）
+printf 'POLYGONSCAN_API_KEY=%s\nHELIUS_API_KEY=%s\n' '你的 key' '你的 key' \
+  >> ~/danmu-intel-data/.env
+```
+
 ### 统计门槛怎么调（T4）
 
 门槛（灰信号 N/M/K、终局信号阈值、边界复核门槛）都在 `config` 表，改动留审计：
@@ -240,6 +288,8 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 | 用户哈希盐值 | `~/danmu-intel-data/salt`（0600） | 否 |
 | **凭据**（`DEEPSEEK_API_KEY` 等） | `~/danmu-intel-data/.env`（**0600，权限不对就拒读**） | 否 |
 | LLM 调用账本 | `db.sqlite3` 的 `llm_calls` 表（成本硬闸的数据源） | 否 |
+| 链上监听游标 | `db.sqlite3` 的 `chain_cursors` 表（一地址一行：扫到哪了） | 否 |
+| 供应商额度账本 | `db.sqlite3` 的 `quota_usage` 表（按供应商按日累加；报警阈值的唯一数据源） | 否 |
 | 提示词模板 | `prompts/interpretation/<版本>/` | 是 |
 | 站点产物 | `site/**`（整棵站点树 + `release.json`；暂存目录 `site/.staging/` 不进 git） | 是 |
 
@@ -290,6 +340,13 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 `tests/unit/test_release.py` 覆盖原子替换、幂等、失败保留上一版、回滚（含账本对齐失败报警）、
 结束转公开，端到端在 `tests/e2e/test_publish_loop.py`（CLI 全流程，全程不联网）。
 
+链上监听的测试缝在**注入的假供应商（假链 + 假时钟）**：`tests/unit/test_chain_polygonscan.py` /
+`test_chain_helius.py` 验纯函数解析（原生/ERC20/SPL 代币、memo、失败交易跳过、翻页与上限、
+限速与错误措辞、凭据不进异常消息），`tests/unit/test_chain_quota.py` 验游标单调性与额度窗口，
+`tests/unit/test_chain_watcher.py` 验轮询/补扫/告警去重，端到端在 `tests/e2e/test_chain_watch.py`
+（一轮轮询看见入账 → 限速那轮不静默且游标不动 → 恢复后补扫找回那一笔 → 账本逐次可对）。
+全程不连外网，也没有任何真实密钥（测试里的 key 是拼接出来的假串，扫面工具自己也要能扫过）。
+
 ## 边界
 
 - 公开弹幕是唯一数据来源，不使用任何需要突破访问限制的手段。
@@ -299,6 +356,10 @@ python3 tools/record_fixtures.py sanitize --platform soop \
   且**不提供任何对外导出接口**。
 - 切片边界的来源与冲突都留档：`slices.boundary_source` + `conflict_note`；人工修正进
   `audit_log`，且自动来源永不覆盖人工修正过的切片（需求 FR-C2-5）。
+- **链上监听只看见、不动用**（AC-12 / FR-C6-17..19）：系统不持有私钥、助记词、keystore、
+  交易所 API key，也没有任何签名能力；只存地址、交易标识、金额、memo 与游标。供应商 API key
+  只从仓库外 `.env`（0600）读，不入库、不进 stdout/stderr 与异常消息（`pre-commit` 与测试
+  双重扫面，`git log -p --all` 也算）。
 - 解读层的纪律由**代码**兜底而不是提示词自觉：模型只看到事实层 JSON，输出受 JSON Schema
   约束，写完再由反幻觉校验逐项比对事实层；校验不过就丢弃重试，再不过就规则直出并标注。
   拦不住的部分（中文昵称、"指控性结论"）在本版是靠提示词纪律 + 人工抽检，见 ADR-0014。
