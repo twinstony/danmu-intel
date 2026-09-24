@@ -7,7 +7,8 @@
 
 T4 加 `gray_signals`（灰信号，含类别与作废原因）、`audit_log`（人工修正留痕）、
 `config`（统计门槛，改动留审计）。T7 加 `releases`（发布批次账本：版本标识、树指纹、
-部署与提交指针、本批付费的比赛）。
+部署与提交指针、本批付费的比赛）。T8 加 `chain_cursors`（链上监听游标，补扫与断点续扫的
+依据）与 `quota_usage`（供应商额度记账，报警阈值的唯一数据源）。
 
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
@@ -114,6 +115,16 @@ CREATE TABLE IF NOT EXISTS llm_calls(        -- LLM 调用记账（成本硬闸�
 CREATE TABLE IF NOT EXISTS config(             -- 后台可视化配置（≤60s 生效）
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL,
   updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS chain_cursors(     -- 链上监听游标（补扫与断点续扫的依据）
+  id INTEGER PRIMARY KEY, network TEXT NOT NULL, scope TEXT NOT NULL,
+  cursor TEXT NOT NULL,         -- polygon: 已处理到的最新入账区块；solana: 已处理的最新签名
+  updated_at INTEGER NOT NULL, UNIQUE(network, scope));
+
+CREATE TABLE IF NOT EXISTS quota_usage(       -- 供应商额度记账（FR-C6-11 / NFR-C-3）
+  id INTEGER PRIMARY KEY, provider TEXT NOT NULL, day TEXT NOT NULL,
+  calls INTEGER NOT NULL DEFAULT 0, credits REAL NOT NULL DEFAULT 0,
+  last_error TEXT, updated_at INTEGER NOT NULL, UNIQUE(provider, day));
 """
 
 
