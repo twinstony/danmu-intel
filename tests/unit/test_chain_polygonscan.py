@@ -190,13 +190,25 @@ def test_full_page_triggers_a_second_page(conn):
     assert transport.calls[1]["params"]["page"] == "2"
 
 
-def test_paging_stops_at_the_page_cap(conn):
+def test_paging_at_the_cap_raises_instead_of_silently_truncating(conn):
+    """翻满上限且还有剩 → 报错（半截历史不得当成全部：游标不许越过没取回的那段）。"""
     full_page = [native_row(block=index + 1, tx=f"0x{index:04x}") for index in range(PAGE_SIZE)]
-    transport = ScriptedTransport(replies=[ok(full_page)] * MAX_PAGES)
+    transport = ScriptedTransport(replies=[ok(full_page)] * MAX_PAGES + [ok([native_row()])])
+
+    with pytest.raises(ProviderError, match="翻到上限"):
+        client(conn, transport).native_transfers(ADDRESS)
+    assert len(transport.calls) == MAX_PAGES + 1  # 第 MAX_PAGES+1 次是探询
+    assert transport.calls[-1]["params"]["page"] == str(MAX_PAGES + 1)
+
+
+def test_paging_at_the_cap_is_fine_when_the_probe_is_empty(conn):
+    """整倍数边界（最后一页刚好满，但确实到底了）不算截断：不多报一次警。"""
+    full_page = [native_row(block=index + 1, tx=f"0x{index:04x}") for index in range(PAGE_SIZE)]
+    transport = ScriptedTransport(replies=[ok(full_page)] * MAX_PAGES + [empty()])
     found = client(conn, transport).native_transfers(ADDRESS)
 
     assert len(found) == PAGE_SIZE * MAX_PAGES
-    assert len(transport.calls) == MAX_PAGES
+    assert len(transport.calls) == MAX_PAGES + 1
 
 
 def test_empty_history_is_not_an_error(conn):

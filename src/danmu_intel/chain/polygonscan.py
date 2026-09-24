@@ -144,24 +144,35 @@ class PolygonscanClient:
     # —— 内部 ——
 
     def _walk(self, action: str, address: str, *, from_block: int) -> list[Mapping[str, Any]]:
-        """按地址翻页取记录（`sort=asc`，因此游标可以一路往前推）。"""
+        """按地址翻页取记录（`sort=asc`，因此游标可以一路往前推）。
+
+        翻满 `MAX_PAGES` 且最后一页仍是满页时，**多问一页**确认到底还有没有剩：有剩就报错，
+        而不是把半截历史当成全部。这一页探询不是洁癖——游标是「原生 + ERC20 两个列表共用的
+        一个区块号」，把半截历史当全部会让另一个列表还没取回的那段被游标越过去，那正是
+        FR-C6-11 要禁的静默漏检。上游（watcher）拿到这个错会报警且**不推游标**。
+        """
         rows: list[Mapping[str, Any]] = []
         for page in range(1, MAX_PAGES + 1):
-            batch = self._call(
-                action,
-                {
-                    "address": address,
-                    "startblock": str(max(0, from_block)),
-                    "endblock": str(HEAD_BLOCK),
-                    "sort": "asc",
-                    "page": str(page),
-                    "offset": str(PAGE_SIZE),
-                },
-            )
+            batch = self._call(action, self._query(address, from_block, page))
             rows.extend(batch)
             if len(batch) < PAGE_SIZE:
-                break
+                return rows
+        if self._call(action, self._query(address, from_block, MAX_PAGES + 1)):
+            raise ProviderError(
+                f"Polygonscan {action} 翻到上限（{MAX_PAGES} 页 × {PAGE_SIZE} 条）还有更早的记录："
+                "宁可停下报警，也不把半截历史当成全部"
+            )
         return rows
+
+    def _query(self, address: str, from_block: int, page: int) -> dict[str, str]:
+        return {
+            "address": address,
+            "startblock": str(max(0, from_block)),
+            "endblock": str(HEAD_BLOCK),
+            "sort": "asc",
+            "page": str(page),
+            "offset": str(PAGE_SIZE),
+        }
 
     def _call(self, action: str, params: Mapping[str, str]) -> list[Mapping[str, Any]]:
         self._throttle.acquire()

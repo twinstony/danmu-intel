@@ -134,6 +134,8 @@ class HeliusClient:
         """新签名（旧→新），跳过失败交易，越界翻页。
 
         `until` 是上一次处理到的最新签名：它之后的才算新记录（Solana 官方语义）。
+        翻满 `MAX_PAGES` 后**再探一次**确认到底还有没有更早的：有就报错，不把半截历史
+        当全部（否则游标会越过没取回来的那段——静默漏检，FR-C6-11）。
         """
         collected: list[Mapping[str, Any]] = []
         cursor = until
@@ -151,9 +153,24 @@ class HeliusClient:
             if len(batch) < PAGE_SIZE:
                 break
             cursor = str(fresh[-1]["signature"])
+        else:
+            if self._has_older_signatures(address, cursor):
+                raise ProviderError(
+                    f"Helius getSignaturesForAddress 翻到上限（{MAX_PAGES} 页 × {PAGE_SIZE} 条）"
+                    "还有更早的签名：宁可停下报警，也不把半截历史当全部"
+                )
         ok = [item for item in collected if not item.get("err")]
         ok.reverse()
         return ok
+
+    def _has_older_signatures(self, address: str, until: str | None) -> bool:
+        """探一页：还有没有比 `until` 更早的签名（只看有无，不取其内容）。"""
+        if until is None:  # pragma: no cover - 翻满页时 cursor 一定已有值
+            return False
+        probe = self._rpc("getSignaturesForAddress", [address, {"limit": 1, "until": until}])
+        if not isinstance(probe, list):
+            raise ProviderError("Helius getSignaturesForAddress 返回的不是列表")
+        return bool(probe)
 
     def transaction(self, signature: str, *, address: str) -> list[Transfer]:
         """一笔交易的到账（可能同时有原生币与代币，甚至多条代币）。"""

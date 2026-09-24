@@ -175,12 +175,28 @@ def test_signature_paging_follows_full_pages(conn):
     assert len(transport.calls) == 2
 
 
-def test_signature_paging_stops_at_the_cap(conn):
+def test_signature_paging_at_the_cap_raises_instead_of_truncating(conn):
+    """翻满上限且还有更早的签名 → 报错（半截历史不得当成全部：游标不许越过那段）。"""
     full_page = [signature(f"sig-{index:04d}") for index in range(PAGE_SIZE)]
-    transport = ScriptedTransport(replies=[rpc(full_page)] * MAX_PAGES)
+    transport = ScriptedTransport(
+        replies=[rpc(full_page)] * MAX_PAGES + [rpc([signature("sig-older")])]
+    )
+
+    with pytest.raises(ProviderError, match="翻到上限"):
+        client(conn, transport).signatures(WALLET)
+    assert transport.calls[-1]["payload"]["params"][1] == {
+        "limit": 1,
+        "until": "sig-0999",
+    }
+
+
+def test_signature_paging_at_the_cap_is_fine_when_the_probe_is_empty(conn):
+    """整倍数边界（最后一页刚好满，但确实到底了）不算截断。"""
+    full_page = [signature(f"sig-{index:04d}") for index in range(PAGE_SIZE)]
+    transport = ScriptedTransport(replies=[rpc(full_page)] * MAX_PAGES + [rpc([])])
     found = client(conn, transport).signatures(WALLET)
+
     assert len(found) == PAGE_SIZE * MAX_PAGES
-    assert len(transport.calls) == MAX_PAGES
 
 
 def test_empty_history_stops_immediately(conn):
