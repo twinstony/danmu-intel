@@ -359,6 +359,24 @@ def test_run_rescans_first_then_polls_by_interval(conn):
     assert clock.slept == [POLL_SECONDS, 1.0]
 
 
+def test_run_without_a_deadline_polls_until_interrupted(conn):
+    """不传 seconds = 持续运行：每轮按间隔睡；睡里被打断（Ctrl-C）就如实抛出去。"""
+    clock = TickingClock()
+    fake = FakePolygon(ledger=QuotaLedger(conn, POLYGONSCAN, clock=clock.clock), script=[[], []])
+    slept: list[float] = []
+
+    def sleep(seconds: float) -> None:
+        slept.append(seconds)
+        if len(slept) == 2:
+            raise KeyboardInterrupt
+        clock.sleep(seconds)
+
+    watcher = Watcher(conn, [target("polygon", ADDRESS)], polygon=fake, clock=clock.clock, sleep=sleep)
+    with pytest.raises(KeyboardInterrupt):
+        watcher.run(rescan_first=False)
+    assert slept == [POLL_SECONDS, POLL_SECONDS]
+
+
 def test_run_can_skip_the_startup_rescan(conn):
     clock = TickingClock()
     ledger = QuotaLedger(conn, POLYGONSCAN, clock=clock.clock)

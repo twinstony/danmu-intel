@@ -199,6 +199,15 @@ def test_signature_paging_at_the_cap_is_fine_when_the_probe_is_empty(conn):
     assert len(found) == PAGE_SIZE * MAX_PAGES
 
 
+def test_the_truncation_probe_shape_is_validated(conn):
+    """探询返回的不是列表 → 如实报错（不把「没看懂」当成「没有剩」）。"""
+    full_page = [signature(f"sig-{index:04d}") for index in range(PAGE_SIZE)]
+    transport = ScriptedTransport(replies=[rpc(full_page)] * MAX_PAGES + [rpc({"nope": 1})])
+
+    with pytest.raises(ProviderError, match="不是列表"):
+        client(conn, transport).signatures(WALLET)
+
+
 def test_empty_history_stops_immediately(conn):
     transport = ScriptedTransport(replies=[rpc([])])
     assert client(conn, transport).transfers(WALLET) == []
