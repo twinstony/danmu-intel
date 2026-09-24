@@ -118,6 +118,10 @@ class HeliusClient:
     def endpoint(self) -> str:
         return f"{self._rpc_base}/?api-key={self._api_key}"
 
+    @property
+    def ledger(self) -> QuotaLedger:
+        return self._ledger
+
     def transfers(self, address: str, *, until: str | None = None) -> list[Transfer]:
         """从游标 `until`（不含）之后的所有入账，按链上时间升序。"""
         found: list[Transfer] = []

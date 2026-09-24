@@ -120,6 +120,10 @@ class PolygonscanClient:
     def provider(self) -> str:
         return POLYGONSCAN
 
+    @property
+    def ledger(self) -> QuotaLedger:
+        return self._ledger
+
     def transfers(self, address: str, *, from_block: int = 0) -> list[Transfer]:
         """从 `from_block`（含）起的所有入账：原生币 + ERC20。"""
         found = [
