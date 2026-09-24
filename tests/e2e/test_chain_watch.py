@@ -183,8 +183,9 @@ def test_missed_payment_is_found_by_rescan(conn, data_root):
     assert cursor.get(conn, "polygon", ADDRESS) == "200"
 
     # ④ 每一次调用都记了账（含被限速的那次）
-    polygonscan = QuotaLedger(conn, POLYGONSCAN).usage()
-    helius = QuotaLedger(conn, HELIUS).usage()
+    # 账本写入走的是被注入的 `clock`（基准时刻），断言也按同一时刻取窗口，避免窗口错位。
+    polygonscan = QuotaLedger(conn, POLYGONSCAN).usage(at_ms=BASE_MS)
+    helius = QuotaLedger(conn, HELIUS).usage(at_ms=BASE_MS)
     assert polygonscan.day_used == 5  # 补扫 2 次（txlist+tokentx）+ 被限速那轮 1 次 + 再补扫 2 次
     assert helius.day_used == 5  # 同上：每笔签名还要一次 getTransaction 取金额与 memo
     assert polygonscan.last_error is None  # 最近一次是成功的

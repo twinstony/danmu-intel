@@ -25,7 +25,9 @@ from danmu_intel.chain.quota import (
 from danmu_intel.chain.transfer import NATIVE_ASSET, Transfer, sort_key
 from danmu_intel.common.notifications import recent
 
-#: 2026-09-24 12:00:00 本地时间（固定基准，不依赖当前时间）
+#: 2026-09-24 12:00:00 本地时间（固定基准，不依赖当前时间）。
+#: 凡按它取窗口的账本（`usage(at_ms=…)` / `day_key`），写入也必须用同一时刻：
+#: `record()` 的默认时钟是 `now_ms()`，两边不同源时窗口会错位（2026-09-25 实测）。
 BASE_MS = int(datetime(2026, 9, 24, 12, 0, 0).timestamp() * 1000)
 
 
@@ -79,7 +81,9 @@ def test_ledger_days_are_separate_rows(conn):
 
 
 def test_helius_monthly_window_sums_the_whole_month(conn):
-    ledger = QuotaLedger(conn, HELIUS)
+    # 账本时钟钉在基准上：`record()` 默认走 `now_ms()`，而断言按 `BASE_MS` 取窗口 ——
+    # 两边不同源时窗口会错位（日窗口错位必红，月窗口要跨月才红）。
+    ledger = QuotaLedger(conn, HELIUS, clock=lambda: BASE_MS)
     ledger.record(credits=1)
     ledger.record(credits=2)
 
@@ -92,11 +96,11 @@ def test_helius_monthly_window_sums_the_whole_month(conn):
 
 def test_threshold_is_strictly_above_eighty_percent(conn):
     ledger = QuotaLedger(conn, POLYGONSCAN, limit=Limit(unit="calls", window="day", cap=10, rate_per_s=5))
-    ledger.record(calls=8)
+    ledger.record(calls=8, at_ms=BASE_MS)
     assert ledger.usage(at_ms=BASE_MS).ratio == pytest.approx(ALERT_RATIO)
     assert ledger.usage(at_ms=BASE_MS).over_threshold is False
 
-    ledger.record(calls=1)
+    ledger.record(calls=1, at_ms=BASE_MS)
     assert ledger.usage(at_ms=BASE_MS).used == 9
     assert ledger.usage(at_ms=BASE_MS).over_threshold is True
     assert "90.0%" in ledger.usage(at_ms=BASE_MS).summary()
@@ -104,10 +108,10 @@ def test_threshold_is_strictly_above_eighty_percent(conn):
 
 def test_last_error_reflects_the_most_recent_call(conn):
     ledger = QuotaLedger(conn, POLYGONSCAN)
-    ledger.record(error="HTTP 502")
+    ledger.record(error="HTTP 502", at_ms=BASE_MS)
     assert ledger.usage(at_ms=BASE_MS).last_error == "HTTP 502"
 
-    ledger.record(calls=1)
+    ledger.record(calls=1, at_ms=BASE_MS)
     assert ledger.usage(at_ms=BASE_MS).last_error is None
 
 
