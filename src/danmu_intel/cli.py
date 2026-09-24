@@ -25,7 +25,7 @@
     danmu-intel rebuild --match-id 1                # AC-13：删统计重算，断言结果不变
     danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核 文件+行范围+SHA256
     danmu-intel chain-watch --polygon-address 0x… --solana-address …   # 链上监听（60s 轮询 + 启动补扫）
-    danmu-intel chain-watch --polygon-address 0x… --once              # 补扫 + 一轮增量后退出（cron 友好）
+    danmu-intel chain-watch --polygon-address 0x… --once              # 只跑一轮增量（按游标，cron 友好）
     danmu-intel chain-usage                            # 供应商额度：当日/当月用量、上限、游标
 
 `chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
@@ -946,7 +946,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--solana-address", action="append", default=None, metavar="ADDR",
         help="Solana 收款地址，可重复（单地址 + 每单唯一 memo）",
     )
-    chain_watch.add_argument("--once", action="store_true", help="只跑一轮增量扫描（启动补扫之后）")
+    chain_watch.add_argument(
+        "--once", action="store_true",
+        help="只跑一轮增量扫描（按游标续扫；不跑全历史补扫，cron 友好）",
+    )
     chain_watch.add_argument("--rescan", action="store_true", help="只做一次补扫（按地址查全历史，不依赖游标）")
     chain_watch.add_argument("--interval", type=float, default=60.0, help="轮询间隔（秒，默认 60）")
     chain_watch.add_argument("--seconds", type=float, default=None, help="总运行时长（秒），缺省持续运行")

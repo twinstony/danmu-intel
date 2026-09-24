@@ -112,10 +112,10 @@ danmu-intel releases                 # 发布批次账本：版本/指纹/提交
 danmu-intel match set-state --match-id 1 --state ended   # 状态机写入即触发公开版再发布
 danmu-intel rollback                 # 回滚到上一批（Vercel 即时回滚 + git revert 跟进）
 
-# ⑨ 链上监听（Polygonscan + Helius；启动补扫 → 每 60 秒增量轮询，两路径互为兜底）
+# ⑨ 链上监听（Polygonscan + Helius；长驻模式 = 启动补扫 → 每 60 秒增量轮询）
 danmu-intel chain-watch --polygon-address 0x… --solana-address 5x…   # 长驻监听（Ctrl-C 停）
-danmu-intel chain-watch --polygon-address 0x… --once    # 补扫 + 一轮增量后退出（cron 友好）
-danmu-intel chain-watch --solana-address 5x… --rescan   # 只做一次补扫（按地址查全历史，不依赖游标）
+danmu-intel chain-watch --polygon-address 0x… --once    # 只跑一轮增量（按游标；cron 友好）
+danmu-intel chain-watch --solana-address 5x… --rescan   # 补扫一次（按地址查全历史，不依赖游标）
 danmu-intel chain-usage                                 # 额度：当日/当月用量、上限、限速 + 监听游标
 
 # ⑩ 自检
