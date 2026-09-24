@@ -202,7 +202,7 @@ def test_paging_stops_at_the_page_cap(conn):
 def test_empty_history_is_not_an_error(conn):
     transport = ScriptedTransport(replies=[empty(), empty()])
     assert client(conn, transport).transfers(ADDRESS) == []
-    assert QuotaLedger(conn, POLYGONSCAN).usage().day_calls == 2
+    assert QuotaLedger(conn, POLYGONSCAN).usage().day_used == 2
 
 
 def test_no_records_found_wording_is_also_empty(conn):
@@ -218,7 +218,7 @@ def test_rate_limit_is_reported_and_recorded(conn):
     assert "Max rate limit reached" in str(exc.value)
     assert FAKE_KEY not in str(exc.value)
     ledger = QuotaLedger(conn, POLYGONSCAN)
-    assert ledger.usage().day_calls == 1  # 被限速的请求也照记
+    assert ledger.usage().day_used == 1  # 被限速的请求也照记
     assert "Max rate limit reached" in (ledger.usage().last_error or "")
 
 
@@ -226,7 +226,7 @@ def test_http_429_is_reported_and_recorded(conn):
     transport = ScriptedTransport(replies=[RateLimited("Polygonscan 限速：HTTP 429")])
     with pytest.raises(RateLimited, match="HTTP 429"):
         client(conn, transport).native_transfers(ADDRESS)
-    assert QuotaLedger(conn, POLYGONSCAN).usage().day_calls == 1
+    assert QuotaLedger(conn, POLYGONSCAN).usage().day_used == 1
 
 
 def test_provider_error_is_reported_and_recorded(conn):
@@ -235,7 +235,7 @@ def test_provider_error_is_reported_and_recorded(conn):
         client(conn, transport).native_transfers(ADDRESS)
 
     ledger = QuotaLedger(conn, POLYGONSCAN)
-    assert ledger.usage().day_calls == 1
+    assert ledger.usage().day_used == 1
     assert ledger.usage().last_error == "Polygonscan 返回错误：NOTOK｜Invalid Address format"
 
 
@@ -243,7 +243,7 @@ def test_transport_failure_is_recorded(conn):
     transport = ScriptedTransport(replies=[ProviderError("Polygonscan 不可达（URLError）")])
     with pytest.raises(ProviderError, match="不可达"):
         client(conn, transport).native_transfers(ADDRESS)
-    assert QuotaLedger(conn, POLYGONSCAN).usage().day_calls == 1
+    assert QuotaLedger(conn, POLYGONSCAN).usage().day_used == 1
 
 
 def test_successful_call_clears_last_error(conn):
@@ -272,7 +272,7 @@ def test_quota_is_recorded_once_per_request(conn):
     transport = ScriptedTransport(replies=[ok([]), ok([])])
     client(conn, transport).transfers(ADDRESS)
     usage = QuotaLedger(conn, POLYGONSCAN).usage()
-    assert usage.day_calls == 2
+    assert usage.day_used == 2
     assert usage.over_threshold is False
 
 

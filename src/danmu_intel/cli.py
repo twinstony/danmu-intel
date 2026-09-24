@@ -24,6 +24,12 @@
     danmu-intel match set-state --match-id 1 --state ended   # 状态机写入 → 自动再发布公开版（FR-C5-10）
     danmu-intel rebuild --match-id 1                # AC-13：删统计重算，断言结果不变
     danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核 文件+行范围+SHA256
+    danmu-intel chain-watch --polygon-address 0x… --solana-address …   # 链上监听（60s 轮询 + 启动补扫）
+    danmu-intel chain-watch --polygon-address 0x… --once              # 补扫 + 一轮增量后退出（cron 友好）
+    danmu-intel chain-usage                            # 供应商额度：当日/当月用量、上限、游标
+
+`chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
+一次调用记一次 `quota_usage`，用量 >80% 或撞限速都会写一条待投递报警（投递属 T11）。
 
 `report` 的解读层：配了凭据（仓库外 `.env`，0600，键 `DEEPSEEK_API_KEY`）就走受约束的
 LLM 调用 + 反幻觉校验 + 成本硬闸；没配/超时/报错/校验不过就回落规则直出，并在命令输出、
@@ -42,6 +48,7 @@ from datetime import datetime
 
 from danmu_intel.common import paths
 from danmu_intel.common.audit import record as audit_record
+from danmu_intel.chain.transfer import Transfer
 from danmu_intel.common.config import load_stats_config, save_stats_config
 from danmu_intel.common.db import open_db
 from danmu_intel.common.matches import create_match, get_match, set_match_state
@@ -688,6 +695,112 @@ def _cmd_match_set_state(args: argparse.Namespace) -> int:
     return 0
 
 
+def _chain_targets(args: argparse.Namespace) -> list:
+    """监听目标：一类一条命令行参数，可重复（T9 会把订单地址喂进来）。"""
+    from danmu_intel.chain.watcher import WatchTarget
+
+    targets = [WatchTarget(network="polygon", address=item) for item in args.polygon_address or []]
+    targets += [WatchTarget(network="solana", address=item) for item in args.solana_address or []]
+    if not targets:
+        raise ValueError("至少要给一个监听地址：--polygon-address 或 --solana-address")
+    return targets
+
+
+def _chain_watcher(conn, targets: list):
+    """按目标涉及的网络造客户端与监听器（缺凭据直接报错，不静默降级）。"""
+    from danmu_intel.chain import helius, polygonscan
+    from danmu_intel.chain.watcher import Watcher
+
+    clients: dict[str, object] = {}
+    wanted = {target.network for target in targets}
+    if "polygon" in wanted:
+        clients["polygon"] = polygonscan.client_from_credentials(conn=conn)
+    if "solana" in wanted:
+        clients["solana"] = helius.client_from_credentials(conn=conn)
+    return Watcher(conn, targets, polygon=clients.get("polygon"), helius=clients.get("solana"))
+
+
+def _print_transfer(transfer: Transfer) -> None:
+    memo = f"｜memo {transfer.memo}" if transfer.memo else ""
+    where = f"区块 {transfer.block}" if transfer.block is not None else "-"
+    print(
+        f"入账｜{transfer.network}/{transfer.address}｜{transfer.asset}｜{transfer.units}｜"
+        f"{where}｜{_stamp(transfer.at_ms)}｜{transfer.tx_ref}{memo}"
+    )
+
+
+def _cmd_chain_watch(args: argparse.Namespace) -> int:
+    """链上监听：启动补扫（不看游标）→ 每 60 秒按游标增量轮询（ADR-0005 双重路径）。"""
+    targets = _chain_targets(args)
+    conn = open_db()
+    try:
+        try:
+            watcher = _chain_watcher(conn, targets)
+        except CredentialError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            return 2
+        if args.rescan:
+            print(f"补扫 {len(targets)} 个地址（按地址查全历史，不依赖游标）")
+            observation = watcher.rescan()
+            for transfer in observation.transfers:
+                _print_transfer(transfer)
+        elif args.once:
+            observation = watcher.poll()
+            for transfer in observation.transfers:
+                _print_transfer(transfer)
+        else:
+            print(
+                f"开始监听 {len(targets)} 个地址：启动补扫 → 每 {args.interval:.0f} 秒增量轮询"
+                + ("，持续运行" if args.seconds is None else f"，共 {args.seconds:.0f} 秒")
+            )
+            observation = watcher.run(
+                seconds=args.seconds, interval=args.interval, on_transfer=_print_transfer
+            )
+        crossed = watcher.check_quota()
+        for summary in crossed:
+            print(f"额度告警｜{summary}")
+        for failure in observation.failures:
+            print(f"扫描失败｜{failure}", file=sys.stderr)
+    finally:
+        conn.close()
+    print(
+        f"本轮共看见 {len(observation.transfers)} 笔入账"
+        f"（扫描失败 {len(observation.failures)} 个目标）"
+    )
+    return 1 if observation.failures else 0
+
+
+def _cmd_chain_usage(args: argparse.Namespace) -> int:
+    """供应商额度记账：当日/当月用量、上限、报警阈值、游标（NFR-C-3；后台页属 T12）。"""
+    from danmu_intel.chain import cursor as chain_cursor
+    from danmu_intel.chain.quota import PROVIDERS, QuotaLedger
+
+    conn = open_db()
+    try:
+        usages = [(provider, QuotaLedger(conn, provider).usage()) for provider in PROVIDERS]
+        marks = chain_cursor.rows(conn)
+    finally:
+        conn.close()
+    for provider, usage in usages:
+        limit = usage.limit
+        print(
+            f"{provider}（{limit.unit_label}，按{limit.window_label}看上限 {limit.cap}，"
+            f"限速 {limit.rate_per_s:.1f}/秒）"
+        )
+        print(f"  当日 {usage.day_used} {limit.unit_label}｜当月 {usage.month_used} {limit.unit_label}")
+        print(f"  {usage.summary()}｜成本 ¥0.00（免费额度内：超额是限速/拒绝，不会自动计费）")
+        if usage.over_threshold:
+            print("  ⚠ 已越报警阈值（已写待投递报警；投递属 T11）")
+        if usage.last_error:
+            print(f"  最近一次失败：{usage.last_error}")
+    print("监听游标（扫到哪了）：")
+    if not marks:
+        print("  还没有扫过任何地址")
+    for mark in marks:
+        print(f"  {mark.network}/{mark.scope}：{mark.cursor}｜{_stamp(mark.updated_at)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→报告三形态）")
     parser.add_argument("--verbose", action="store_true", help="打印重连等运行日志")
@@ -823,6 +936,24 @@ def build_parser() -> argparse.ArgumentParser:
     verify.add_argument("--match-id", type=int, required=True)
     verify.add_argument("--kind", required=True, help="报告形态：live_brief | full | review")
     verify.set_defaults(func=_cmd_verify_sources)
+
+    chain_watch = sub.add_parser("chain-watch", help="链上监听：启动补扫 + 每 60 秒增量轮询")
+    chain_watch.add_argument(
+        "--polygon-address", action="append", default=None, metavar="ADDR",
+        help="Polygon 收款地址，可重复（派生地址由 T9 的订单流程给出）",
+    )
+    chain_watch.add_argument(
+        "--solana-address", action="append", default=None, metavar="ADDR",
+        help="Solana 收款地址，可重复（单地址 + 每单唯一 memo）",
+    )
+    chain_watch.add_argument("--once", action="store_true", help="只跑一轮增量扫描（启动补扫之后）")
+    chain_watch.add_argument("--rescan", action="store_true", help="只做一次补扫（按地址查全历史，不依赖游标）")
+    chain_watch.add_argument("--interval", type=float, default=60.0, help="轮询间隔（秒，默认 60）")
+    chain_watch.add_argument("--seconds", type=float, default=None, help="总运行时长（秒），缺省持续运行")
+    chain_watch.set_defaults(func=_cmd_chain_watch)
+
+    chain_usage = sub.add_parser("chain-usage", help="供应商额度：当日/当月用量、上限、游标")
+    chain_usage.set_defaults(func=_cmd_chain_usage)
 
     return parser
 

@@ -140,6 +140,7 @@ def test_db_creates_all_tables(data_root):
     try:
         assert table_names(conn) == [
             "audit_log",
+            "chain_cursors",
             "config",
             "danmu_segments",
             "gray_signals",
@@ -147,6 +148,7 @@ def test_db_creates_all_tables(data_root):
             "matches",
             "metrics",
             "notifications",
+            "quota_usage",
             "releases",
             "reports",
             "room_sessions",

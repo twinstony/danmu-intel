@@ -59,9 +59,9 @@ def test_ledger_accumulates_within_the_day(conn):
     ledger.record(calls=2, at_ms=BASE_MS + 120_000)
 
     usage = ledger.usage(at_ms=BASE_MS)
-    assert usage.day_calls == 4
+    assert usage.day_used == 4
     assert usage.used == 4
-    assert usage.month_calls == 4
+    assert usage.month_used == 4
     assert usage.window_key == "2026-09-24"
     assert usage.cap == 100_000
     assert usage.over_threshold is False
@@ -72,10 +72,10 @@ def test_ledger_days_are_separate_rows(conn):
     ledger.record(calls=3, at_ms=BASE_MS)
     ledger.record(calls=5, at_ms=BASE_MS + 24 * 3600 * 1000)
 
-    assert ledger.usage(at_ms=BASE_MS).day_calls == 3
-    assert ledger.usage(at_ms=BASE_MS + 24 * 3600 * 1000).day_calls == 5
+    assert ledger.usage(at_ms=BASE_MS).day_used == 3
+    assert ledger.usage(at_ms=BASE_MS + 24 * 3600 * 1000).day_used == 5
     # 当月是跨日的合计，上限窗口是「日」时 `used` 只算当日
-    assert ledger.usage(at_ms=BASE_MS + 24 * 3600 * 1000).month_calls == 8
+    assert ledger.usage(at_ms=BASE_MS + 24 * 3600 * 1000).month_used == 8
 
 
 def test_helius_monthly_window_sums_the_whole_month(conn):
@@ -85,7 +85,7 @@ def test_helius_monthly_window_sums_the_whole_month(conn):
 
     usage = ledger.usage(at_ms=BASE_MS)
     assert usage.used == 3
-    assert usage.month_credits == 3.0
+    assert usage.month_used == 3
     assert usage.window_key == "2026-09"
     assert usage.cap == 1_000_000
 
@@ -113,7 +113,7 @@ def test_last_error_reflects_the_most_recent_call(conn):
 
 def test_usage_on_an_empty_ledger_is_zero(conn):
     usage = QuotaLedger(conn, HELIUS).usage(at_ms=BASE_MS)
-    assert (usage.used, usage.day_calls, usage.month_credits) == (0, 0, 0.0)
+    assert (usage.used, usage.day_used, usage.month_used) == (0, 0, 0)
     assert usage.ratio == 0.0
 
 

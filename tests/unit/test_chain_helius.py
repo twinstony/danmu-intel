@@ -195,7 +195,7 @@ def test_quota_counts_one_credit_per_rpc_call(conn):
 
     usage = QuotaLedger(conn, HELIUS).usage()
     assert usage.used == 2
-    assert usage.month_credits == 2.0
+    assert usage.month_used == 2
     assert usage.last_error is None
 
 

@@ -50,6 +50,10 @@ class Limit:
     def window_label(self) -> str:
         return {"day": "日", "month": "月"}[self.window]
 
+    @property
+    def unit_label(self) -> str:
+        return "次调用" if self.unit == "calls" else "credits"
+
 
 #: 免费额度与限速（ADR-0005 实测值：Polygonscan 5 calls/s、10 万 calls/天；
 #: Helius 1M credits/月、10 req/s）。
@@ -91,21 +95,27 @@ def _month_bounds(at_ms: int, *, tz: tzinfo | None = None) -> tuple[str, str]:
 
 @dataclass(frozen=True, slots=True)
 class Usage:
-    """一个供应商的用量快照（当日 / 当月都给出，NFR-C-3）。"""
+    """一个供应商的用量快照（当日 / 当月都给出，NFR-C-3）。
+
+    `day_used` / `month_used` 已经换算成该供应商的**计量单位**（calls 或 credits），
+    因此“当日用了几成”不需要调用方再关心单位。
+    """
 
     provider: str
     limit: Limit
     window_key: str  # 上限所在窗口的键：`2026-09-24`（日）或 `2026-09`（月）
-    used: int  # 上限窗口内的用量
-    day_calls: int
-    day_credits: float
-    month_calls: int
-    month_credits: float
+    day_used: int
+    month_used: int
     last_error: str | None
 
     @property
     def cap(self) -> int:
         return self.limit.cap
+
+    @property
+    def used(self) -> int:
+        """上限窗口内的用量（日窗口看当日，月窗口看当月）。"""
+        return self.day_used if self.limit.window == "day" else self.month_used
 
     @property
     def ratio(self) -> float:
@@ -118,8 +128,8 @@ class Usage:
 
     def summary(self) -> str:
         return (
-            f"{self.provider}：{self.limit.window_label}{self.limit.unit} "
-            f"{self.used}/{self.cap}（{self.ratio * 100:.1f}%，阈值 {ALERT_RATIO * 100:.0f}%）"
+            f"{self.provider}：{self.limit.window_label}用量 {self.used}/{self.cap} "
+            f"{self.limit.unit_label}（{self.ratio * 100:.1f}%，报警阈值 {ALERT_RATIO * 100:.0f}%）"
         )
 
 
@@ -193,21 +203,18 @@ class QuotaLedger:
         day_credits = float(day_row["credits"]) if day_row else 0.0
         month_calls = int(month_row["calls"])
         month_credits = float(month_row["credits"])
+        # 换算成该供应商的计量单位（credits 允许小数，用量按整数报）
         if self._limit.unit == "calls":
-            used = day_calls if self._limit.window == "day" else month_calls
+            day_used, month_used = day_calls, month_calls
         else:
-            raw = day_credits if self._limit.window == "day" else month_credits
-            used = int(round(raw))
+            day_used, month_used = int(round(day_credits)), int(round(month_credits))
         window_key = day if self._limit.window == "day" else month_key(stamp, tz=self._tz)
         return Usage(
             provider=self._provider,
             limit=self._limit,
             window_key=window_key,
-            used=used,
-            day_calls=day_calls,
-            day_credits=day_credits,
-            month_calls=month_calls,
-            month_credits=month_credits,
+            day_used=day_used,
+            month_used=month_used,
             last_error=(day_row["last_error"] if day_row else None),
         )
 
