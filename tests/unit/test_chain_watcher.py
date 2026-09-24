@@ -352,11 +352,11 @@ def test_run_rescans_first_then_polls_by_interval(conn):
 
     total = watcher.run(seconds=POLL_SECONDS + 1, on_transfer=lambda item: seen.append(item.tx_ref))
 
-    # ① 启动补扫（不看游标，把历史全摆上桌）② 一轮增量 ③ 到点停
+    # ① 启动补扫（不看游标，把历史全摆上桌）② 一轮增量 ③ 剩下 1 秒就只睡 1 秒，到点停
     assert [call["from_block"] for call in fake.calls] == [0, 401, 501]
     assert [item.tx_ref for item in total.transfers] == ["0xold", "0xnew"]
     assert seen == ["0xold", "0xnew"]
-    assert clock.slept == [POLL_SECONDS, POLL_SECONDS]
+    assert clock.slept == [POLL_SECONDS, 1.0]
 
 
 def test_run_can_skip_the_startup_rescan(conn):

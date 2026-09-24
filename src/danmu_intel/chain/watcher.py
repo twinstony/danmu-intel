@@ -148,9 +148,14 @@ class Watcher:
             if on_transfer is not None:
                 for transfer in observation.transfers:
                     on_transfer(transfer)
-            if deadline is not None and self._clock() >= deadline:
+            if deadline is None:
+                self._sleep(interval)
+                continue
+            # 剩下不足一个间隔就只睡剩下的：`seconds` 是总时长，不是「最后多跑一轮」
+            remaining = (deadline - self._clock()) / 1000
+            if remaining <= 0:
                 return total
-            self._sleep(interval)
+            self._sleep(min(interval, remaining))
 
     def check_quota(self) -> list[str]:
         """额度越线的供应商：报警（同窗口只报一次）并返回说明，供 CLI 打印。"""
