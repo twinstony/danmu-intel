@@ -323,3 +323,144 @@ def test_gray_command_reports_discarded_with_reason(data_root, conn, capsys):
     assert "没有达到门槛的灰信号" in out
     assert "已作废：假赛——未达证据门槛" in out
     assert "u1" not in out, "命令行输出里也不得出现身份标识"
+
+
+# —— 链上监听（T8）——
+
+
+class FakeChainClient:
+    """假的供应商客户端：只实现 CLI 真正用到的两个成员。"""
+
+    def __init__(self, ledger, transfers=None, failure=None):
+        self.ledger = ledger
+        self._transfers = list(transfers or [])
+        self._failure = failure
+        self.calls = 0
+
+    def _serve(self):
+        self.calls += 1
+        if self._failure is not None:
+            raise self._failure
+        return list(self._transfers)
+
+    def transfers(self, address, *, from_block=0):
+        return self._serve()
+
+    def signatures(self, address, *, until=None):
+        self._serve()
+        return []
+
+
+def _chain_client(monkeypatch, module_name: str, client) -> None:
+    import importlib
+
+    module = importlib.import_module(f"danmu_intel.chain.{module_name}")
+    monkeypatch.setattr(module, "client_from_credentials", lambda **kwargs: client)
+
+
+def _polygon_transfer():
+    from danmu_intel.chain.transfer import NATIVE_ASSET, Transfer
+
+    return Transfer(
+        network="polygon",
+        address="0xabc",
+        tx_ref="0xpay1",
+        asset=NATIVE_ASSET,
+        units=1_000_000_000_000_000_000,
+        at_ms=BASE_TS,
+        block=100,
+    )
+
+
+def test_chain_usage_prints_quota_and_cursors(conn, capsys):
+    from danmu_intel.chain import cursor
+    from danmu_intel.chain.quota import POLYGONSCAN, QuotaLedger
+
+    QuotaLedger(conn, POLYGONSCAN).record(calls=3)
+    cursor.advance(conn, "polygon", "0xabc", "12345", at_ms=BASE_TS)
+
+    assert main(["chain-usage"]) == 0
+    out = capsys.readouterr().out
+    assert "polygonscan" in out and "helius" in out
+    assert "当日 3 次调用" in out
+    assert "免费额度内" in out
+    assert "polygon/0xabc：12345" in out
+
+
+def test_chain_usage_without_any_data(conn, capsys):
+    assert main(["chain-usage"]) == 0
+    out = capsys.readouterr().out
+    assert "当日 0 次调用" in out
+    assert "还没有扫过任何地址" in out
+
+
+def test_chain_watch_requires_an_address(capsys):
+    assert main(["chain-watch"]) == 2
+    assert "至少要给一个监听地址" in capsys.readouterr().err
+
+
+def test_chain_watch_without_credentials_is_a_loud_error(conn, capsys):
+    assert main(["chain-watch", "--polygon-address", "0xabc", "--once"]) == 2
+    assert "POLYGONSCAN_API_KEY" in capsys.readouterr().err
+
+
+def test_chain_watch_once_prints_transfers(conn, monkeypatch, capsys):
+    from danmu_intel.chain.quota import POLYGONSCAN, QuotaLedger
+
+    _chain_client(
+        monkeypatch,
+        "polygonscan",
+        FakeChainClient(QuotaLedger(conn, POLYGONSCAN), transfers=[_polygon_transfer()]),
+    )
+
+    assert main(["chain-watch", "--polygon-address", "0xabc", "--once"]) == 0
+    out = capsys.readouterr().out
+    assert "入账｜polygon/0xabc｜native｜1000000000000000000" in out
+    assert "0xpay1" in out
+    assert "本轮共看见 1 笔入账" in out
+
+
+def test_chain_watch_rescan_mode(conn, monkeypatch, capsys):
+    from danmu_intel.chain.quota import POLYGONSCAN, QuotaLedger
+
+    _chain_client(
+        monkeypatch,
+        "polygonscan",
+        FakeChainClient(QuotaLedger(conn, POLYGONSCAN), transfers=[_polygon_transfer()]),
+    )
+
+    assert main(["chain-watch", "--polygon-address", "0xabc", "--rescan"]) == 0
+    out = capsys.readouterr().out
+    assert "补扫 1 个地址" in out
+    assert "本轮共看见 1 笔入账" in out
+
+
+def test_chain_watch_loop_mode_stops_at_seconds(conn, monkeypatch, capsys):
+    from danmu_intel.chain.quota import POLYGONSCAN, QuotaLedger
+
+    _chain_client(
+        monkeypatch,
+        "polygonscan",
+        FakeChainClient(QuotaLedger(conn, POLYGONSCAN), transfers=[_polygon_transfer()]),
+    )
+
+    assert main(["chain-watch", "--polygon-address", "0xabc", "--seconds", "0"]) == 0
+    out = capsys.readouterr().out
+    assert "开始监听 1 个地址" in out
+    assert "本轮共看见 1 笔入账" in out
+
+
+def test_chain_watch_reports_failures_with_nonzero_exit(conn, monkeypatch, capsys):
+    from danmu_intel.chain.provider import RateLimited
+    from danmu_intel.chain.quota import POLYGONSCAN, QuotaLedger
+
+    _chain_client(
+        monkeypatch,
+        "polygonscan",
+        FakeChainClient(QuotaLedger(conn, POLYGONSCAN), failure=RateLimited("限速：HTTP 429")),
+    )
+
+    assert main(["chain-watch", "--polygon-address", "0xabc", "--once"]) == 1
+    captured = capsys.readouterr()
+    assert "扫描失败｜polygon/0xabc：限速：HTTP 429" in captured.err
+    assert "本轮共看见 0 笔入账（扫描失败 1 个目标）" in captured.out
