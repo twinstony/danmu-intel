@@ -6,7 +6,8 @@
 ② 漏一笔：供应商限速 → 这一轮扫不成，**报警**（不静默），游标停在原处；
 ③ 补扫：不依赖游标、按地址查全历史 → 那一笔照样被发现（AC-5 原文）；
 ④ 额度记账：每一次调用（含被限速的那次）都记进 `quota_usage`；
-⑤ 链上数据里零命中私钥/助记词（AC-12）。
+⑤ 重启（新建监听器 = 新进程）从落库的游标续扫，不把已看见的付款再报一遍；
+⑥ 链上数据里零命中私钥/助记词（AC-12）。
 """
 
 from __future__ import annotations
@@ -191,6 +192,24 @@ def test_missed_payment_is_found_by_rescan(conn, data_root):
     # ⑤ 链上数据里零命中可动用资产的凭据（AC-12）
     assert scan_tree(data_root) == []
     assert scan_tree(paths.repo_root()) == []
+
+
+def test_restart_continues_from_the_persisted_cursor(conn, data_root):
+    """重启续扫：新进程（= 新建监听器与客户端，游标只在库里）从断点接着扫，不重报旧账。"""
+    chain = FakeChain()
+    chain.pay_native(100, units=1_000, tx="0xfirst")
+    chain.pay_solana("sig-1", lamports=250_000_000, memo="mem-1")
+    first = build_watcher(conn, chain, clock=lambda: BASE_MS).poll()
+    assert {item.tx_ref for item in first.transfers} == {"0xfirst", "sig-1"}
+
+    # 停一会儿，链上又进两笔，然后进程重启（同一个数据目录）
+    chain.pay_native(150, units=2_000, tx="0xsecond")
+    chain.pay_solana("sig-2", lamports=300_000_000, memo="mem-2")
+    restarted = build_watcher(conn, chain, clock=lambda: BASE_MS).poll()
+
+    assert {item.tx_ref for item in restarted.transfers} == {"0xsecond", "sig-2"}  # 旧账不再出现
+    assert cursor.get(conn, "polygon", ADDRESS) == "150"
+    assert cursor.get(conn, "solana", WALLET) == "sig-2"
 
 
 def test_watcher_keeps_running_after_a_provider_failure(conn):
