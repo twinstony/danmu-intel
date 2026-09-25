@@ -88,12 +88,12 @@ def test_detail_rows_carry_no_ip_or_identity_fields(conn):
         ("/a/./b//c.html", "a/b/c.html"),
     ],
 )
-def test_normalize_page_收成站内相对路径(raw, expected):
+def test_normalize_page_keeps_site_relative_paths(raw, expected):
     assert beacon.normalize_page(raw) == expected
 
 
 @pytest.mark.parametrize("raw", ["", "   ", "https://elsewhere.example/x", "//host/x", "../secrets", "x" * 300])
-def test_normalize_page_拒绝非站内路径(raw):
+def test_normalize_page_rejects_anything_but_site_paths(raw):
     with pytest.raises(ValueError):
         beacon.normalize_page(raw)
 
@@ -275,9 +275,15 @@ def test_day_key_matches_local_calendar_day():
     assert beacon.day_of(int((midnight + timedelta(hours=23)).timestamp() * 1000)) == "2026-09-22"
 
 
-def test_paywall_vocabulary_is_the_only_visibility_source(conn):
-    """付费页口径与 `common.paywall` 同源：不在这里另立一套词。"""
-    assert paywall.VISIBILITY_PAID in paywall.VISIBILITIES
+@pytest.mark.parametrize("state", ["scheduled", "live", "between_games", "ended", "aborted"])
+def test_paid_verdict_is_the_state_machine_verdict(conn, state):
+    """付费页口径与状态机**逐状态同源**：这里不另立一套判定（ADR-0009）。"""
+    match_id = create_match(conn, league="LPL", team_a="iG", team_b="LNG", state=state)
+    for page in (f"matches/{match_id}/index.html", f"matches/{match_id}/full.html"):
+        assert beacon.is_paid_page(conn, page) == paywall.is_paid(state)
+
+
+def test_detail_retention_is_ninety_days():
     assert daily.DETAIL_RETENTION_DAYS == 90
 
 
