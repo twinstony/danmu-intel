@@ -7,11 +7,11 @@ from datetime import date
 from danmu_intel import archive
 from danmu_intel.cli import main
 
-from test_archive import CUTOFF, OLD, OLD_ARCHIVED, index_segment
+from test_archive import CUTOFF, OLD, OLD_ARCHIVED, index_file
 
 
 def test_archive_dry_run_lists_what_would_move(conn, data_root, capsys):
-    index_segment(conn, data_root, OLD)
+    index_file(conn, data_root, OLD)
     assert main(["archive", "--dry-run", "--cutoff", CUTOFF.isoformat()]) == 0
 
     out = capsys.readouterr().out
@@ -27,7 +27,7 @@ def test_archive_dry_run_is_quiet_when_nothing_is_due(conn, data_root, capsys):
 
 
 def test_archive_moves_and_reports_the_range(conn, data_root, capsys):
-    index_segment(conn, data_root, OLD)
+    index_file(conn, data_root, OLD)
     assert main(["archive", "--cutoff", CUTOFF.isoformat(), "--allow-same-disk"]) == 0
 
     out = capsys.readouterr().out
@@ -40,7 +40,7 @@ def test_archive_moves_and_reports_the_range(conn, data_root, capsys):
 
 
 def test_archive_refuses_to_write_onto_the_same_disk(conn, data_root, capsys):
-    index_segment(conn, data_root, OLD)
+    index_file(conn, data_root, OLD)
     assert main(["archive", "--cutoff", CUTOFF.isoformat()]) == 2
     assert "归档根不存在" in capsys.readouterr().err
     assert (data_root / OLD).exists()
@@ -61,7 +61,7 @@ def test_archive_reports_anomalies_with_a_non_zero_exit(conn, data_root, capsys)
 
 
 def test_archive_verify_reports_damage(conn, data_root, capsys):
-    index_segment(conn, data_root, OLD)
+    index_file(conn, data_root, OLD)
     main(["archive", "--cutoff", CUTOFF.isoformat(), "--allow-same-disk"])
     capsys.readouterr()
 
@@ -75,7 +75,7 @@ def test_archive_verify_reports_damage(conn, data_root, capsys):
 
 
 def test_archive_retrieve_writes_to_stdout_or_a_file(conn, data_root, capsys, tmp_path):
-    index_segment(conn, data_root, OLD)
+    index_file(conn, data_root, OLD)
     expected = (data_root / OLD).read_text(encoding="utf-8")
     main(["archive", "--cutoff", CUTOFF.isoformat(), "--allow-same-disk"])
     capsys.readouterr()
@@ -97,7 +97,7 @@ def test_archive_retrieve_writes_to_stdout_or_a_file(conn, data_root, capsys, tm
 def test_archive_cli_defaults_to_six_calendar_months(conn, data_root, capsys):
     """不传 `--cutoff` 时用「今天回推 6 个月」；一份两年前的文件因此一定到期。"""
     old = "raw/huya/2024-01-05/660000-09.jsonl"
-    index_segment(conn, data_root, old)
+    index_file(conn, data_root, old)
 
     assert main(["archive", "--allow-same-disk"]) == 0
     out = capsys.readouterr().out
