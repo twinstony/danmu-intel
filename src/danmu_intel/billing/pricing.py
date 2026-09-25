@@ -173,12 +173,16 @@ def asset_for(network: str) -> str:
     return USDT[network]
 
 
-def is_our_asset(network: str, asset: str) -> bool:
-    """链上入账的 `asset` 是不是我们要的收款资产（polygon 比小写，solana 逐字节比）。"""
-    expected = asset_for(network)
+def same_asset(network: str, left: str, right: str) -> bool:
+    """两个资产标识是不是同一个（polygon 的合约地址大小写不保证，solana 的 mint 逐字节比）。"""
     if network == SOLANA:
-        return asset == expected
-    return asset.lower() == expected.lower()
+        return left == right
+    return left.lower() == right.lower()
+
+
+def is_our_asset(network: str, asset: str) -> bool:
+    """链上入账的 `asset` 是不是我们要的收款资产。"""
+    return same_asset(network, asset, asset_for(network))
 
 
 def format_units(units: int) -> str:
