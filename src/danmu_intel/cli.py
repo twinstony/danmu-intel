@@ -1121,7 +1121,11 @@ def _cmd_admin(args: argparse.Namespace) -> int:
         return 2
 
     conn = open_db()
-    release = lambda: _release_context(args)  # noqa: E731 - 按需构造（只有发布/回滚才用）
+
+    def release() -> ReleaseContext:
+        """按需构造：只有点发布/回滚才用（构造会去碰 git 与 Vercel 配置）。"""
+        return _release_context(args)
+
     print(
         f"后台监听 {args.host}:{args.port}（只接受 tailnet 对端；12 个页面；"
         f"{'发布/回滚只落本地产物' if args.no_deploy else '发布/回滚走真实 git + Vercel'}）"
