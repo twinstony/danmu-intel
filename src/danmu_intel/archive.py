@@ -114,10 +114,11 @@ class ArchiveRun:
         return self.online_bytes / self.archive_bytes if self.archive_bytes else 0.0
 
     def summary(self) -> str:
+        head = f"归档根 {self.root}（保留期截止 {self.cutoff.isoformat()}）"
         if not self.archived and not self.anomalies:
-            return f"归档根 {self.root}：没有到期的原始记录（保留期截止 {self.cutoff.isoformat()}）"
+            return f"{head}：没有到期的原始记录"
         line = (
-            f"归档根 {self.root}：到期 {self.due} 个文件 → 已归档 {len(self.archived)} 个"
+            f"{head}：到期 {self.due} 个文件 → 已归档 {len(self.archived)} 个"
             f"（在线 {self.online_bytes} 字节 → 归档件 {self.archive_bytes} 字节"
             f"，{self.ratio:.1f}×）"
         )
