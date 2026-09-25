@@ -58,3 +58,66 @@ def test_admin_passwd_rejects_empty_with_error(monkeypatch, capsys):
     assert main(["admin-passwd"]) == 2
 
     assert "口令不能为空" in capsys.readouterr().err
+
+
+# —— `admin`：起后台进程（只监听 tailnet）——
+
+
+def test_admin_refuses_a_non_tailnet_host(monkeypatch, capsys):
+    monkeypatch.setenv(auth.PASSWORD_HASH_KEY, auth.hash_password("口令"))
+
+    assert main(["admin", "--host", "8.8.8.8"]) == 2
+
+    assert "tailnet" in capsys.readouterr().err
+
+
+def test_admin_refuses_a_wildcard_host(monkeypatch, capsys):
+    monkeypatch.setenv(auth.PASSWORD_HASH_KEY, auth.hash_password("口令"))
+
+    assert main(["admin", "--host", "0.0.0.0"]) == 2
+
+    assert "所有网卡" in capsys.readouterr().err
+
+
+def test_admin_requires_a_configured_password(monkeypatch, capsys):
+    monkeypatch.delenv(auth.PASSWORD_HASH_KEY, raising=False)
+
+    assert main(["admin", "--host", "100.64.0.1"]) == 2
+
+    assert "admin-passwd" in capsys.readouterr().err
+
+
+def test_admin_starts_and_stops_cleanly(monkeypatch, capsys):
+    """起服务的那一行不真的监听端口：把 `server.run` 换成记账函数。"""
+    monkeypatch.setenv(auth.PASSWORD_HASH_KEY, auth.hash_password("口令"))
+    started = {}
+
+    def fake_run(**kwargs):
+        started.update(kwargs)
+        raise KeyboardInterrupt
+
+    from danmu_intel.admin import server
+
+    monkeypatch.setattr(server, "run", fake_run)
+
+    assert main(["admin", "--host", "100.64.0.1", "--port", "8099", "--no-deploy"]) == 0
+
+    assert started["host"] == "100.64.0.1" and started["port"] == 8099
+    assert started["secure_cookie"] is False
+    assert "8099" in capsys.readouterr().out
+
+
+def test_admin_can_use_a_secure_cookie_and_a_custom_actor(monkeypatch):
+    monkeypatch.setenv(auth.PASSWORD_HASH_KEY, auth.hash_password("口令"))
+    started = {}
+
+    def fake_run(**kwargs):
+        started.update(kwargs)
+        raise KeyboardInterrupt
+
+    from danmu_intel.admin import server
+
+    monkeypatch.setattr(server, "run", fake_run)
+
+    assert main(["admin", "--host", "127.0.0.1", "--secure-cookie", "--actor", "运维"]) == 0
+    assert started["secure_cookie"] is True

@@ -33,12 +33,18 @@
     danmu-intel members                                 # 会员列表；--sweep 执行到期降级
     danmu-intel grant --order-ref DM… --tx-ref 0x… --reason "…"   # 人工补开通（AC-5）
     danmu-intel serve                                   # HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报
+    danmu-intel admin-passwd                            # 设后台口令（只把 PBKDF2 哈希写进仓库外 .env）
+    danmu-intel admin --host 100.64.0.1 --port 8090     # 后台（独立进程；只监听 tailnet，12 个页面）
     danmu-intel chain-watch --orders                    # 从待付订单派生监听目标并对账开通（AC-3）
     danmu-intel site-stats --day 2026-09-22             # 那天多少人来过付费页（AC-9：答不了是谁）
     danmu-intel site-stats --prune                      # 站点统计：90 天明细先汇总入 stats_daily 再删
 
 `chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
 一次调用记一次 `quota_usage`，用量 >80% 或撞限速都会写一条待投递报警（投递属 T11）。
+
+后台（`admin`）与公开面是两个进程：公开面走 Funnel 暴露，后台只绑 tailnet 地址、每个请求再判一次
+对端 IP，非 tailnet 一律 403（NFR-S-3 / AC-7）。后台的口令是 PBKDF2 哈希（仓库外 `.env`，0600），
+登录态是 12 小时的签名 cookie；12 个页面只读，16 个写操作全部落 `audit_log`。
 
 `report` 的解读层：配了凭据（仓库外 `.env`，0600，键 `DEEPSEEK_API_KEY`）就走受约束的
 LLM 调用 + 反幻觉校验 + 成本硬闸；没配/超时/报错/校验不过就回落规则直出，并在命令输出、
@@ -1075,6 +1081,42 @@ def _cmd_admin_passwd(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin(args: argparse.Namespace) -> int:
+    """后台（独立进程 + 仅 tailnet 可达 + 单管理员）：12 个页面 + 全部写操作留痕。"""
+    from danmu_intel.admin import auth, server
+
+    try:
+        auth.require_tailnet_host(args.host)  # 先验地址：非 tailnet 直接拒绝启动
+        auth.load_secrets()
+    except (auth.AuthError, CredentialError) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+
+    conn = open_db()
+    release = lambda: _release_context(args)  # noqa: E731 - 按需构造（只有发布/回滚才用）
+    print(
+        f"后台监听 {args.host}:{args.port}（只接受 tailnet 对端；12 个页面；"
+        f"{'发布/回滚只落本地产物' if args.no_deploy else '发布/回滚走真实 git + Vercel'}）"
+    )
+    try:
+        server.run(
+            conn=conn,
+            host=args.host,
+            port=args.port,
+            data_root=paths.data_dir(),
+            release=release,
+            secure_cookie=args.secure_cookie,
+        )
+    except KeyboardInterrupt:
+        print("收到中断，已停止后台")
+    except auth.AuthError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→报告三形态）")
     parser.add_argument("--verbose", action="store_true", help="打印重连等运行日志")
@@ -1276,6 +1318,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     admin_passwd = sub.add_parser("admin-passwd", help="设/改后台口令（只写哈希进仓库外 .env）")
     admin_passwd.set_defaults(func=_cmd_admin_passwd)
+
+    admin = sub.add_parser("admin", help="后台进程（仅 tailnet 可达）：12 个页面 + 写操作留痕")
+    admin.add_argument("--host", required=True, help="监听地址，必须是 tailnet 地址（`tailscale ip -4`）")
+    admin.add_argument("--port", type=int, default=8090)
+    admin.add_argument("--no-deploy", action="store_true", help="发布/回滚只落本地产物：不推 git、不调 Vercel")
+    admin.add_argument("--actor", default="admin", help="后台写操作的操作者（进审计）")
+    admin.add_argument(
+        "--secure-cookie", action="store_true",
+        help="经 https 反代访问时给会话 cookie 加 Secure（直连 tailnet http 时不要加）",
+    )
+    admin.set_defaults(func=_cmd_admin)
 
     site_stats = sub.add_parser(
         "site-stats", help="站点统计：某天的访问量/付费页人数/下单转化/留资（--prune 做 90 天保留）"
