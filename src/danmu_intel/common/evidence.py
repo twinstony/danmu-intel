@@ -10,7 +10,8 @@
 否则归档会打断「在线保留期内报告的数据溯源仍可核验」（NFR-D-4 / AC-17）。
 
 压缩用 stdlib `compression.zstd`（Python 3.14 起自带，本机没有 pip 也不引第三方包）。
-归档件是普通 zstd 流，NAS 上任何 `zstd -d` 都能解开，不绑定本仓库。
+归档件是普通 zstd 流，NAS 上任何 `zstd -d` 都能解开，不绑定本仓库；反过来，归档件坏了
+（传输截断、盘上被改）时抛 `DamagedArtifact` —— 人话、可被调用方拒交，不是裸 `ZstdError`。
 
 摘要有两个口径，别混：
 
@@ -100,10 +101,22 @@ def open_binary(path: Path) -> IO[bytes]:
     return path.open("rb")
 
 
+class DamagedArtifact(ValueError):
+    """归档件读不出来（损坏 / 被截断 / 根本不是 zstd 流）。
+
+    归档件坏掉是**可预期的运维事实**（NAS 传输截断、盘上被改），不是程序 bug：
+    因此这里把它翻成人话的 `ValueError`，让调用方拒交 / 报异常，而不是把压缩器的
+    `zstd.ZstdError` 直接置到用户脸上。
+    """
+
+
 def read_bytes(path: Path) -> bytes:
-    """读内容（归档件解压后）。"""
-    with open_binary(path) as handle:
-        return handle.read()
+    """读内容（归档件解压后）。归档件损坏时抛 `DamagedArtifact`（不是裸 `ZstdError`）。"""
+    try:
+        with open_binary(path) as handle:
+            return handle.read()
+    except zstd.ZstdError as exc:
+        raise DamagedArtifact(f"归档件解压失败（文件损坏或被截断）：{path.name}（{exc}）")
 
 
 # —— 摘要 ——

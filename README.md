@@ -528,6 +528,18 @@ danmu-intel archive --retrieve raw/huya/2026-03-01/660000-16.jsonl --out 取回.
 `requires-python >= 3.14`、`rel_path` 为何改指向而 `sha256` 为何不动）见
 [ADR-0021](docs/adr/0021-archive.md)。
 
+**已有数据目录怎么过渡**（T1–T12 时代建的库）：**不用手工做任何事**。归档给
+`danmu_segments` 加了 `archived_at` / `archive_sha256` 两列，任何命令下一次打开库时
+幂等补齐（`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`，与 `CREATE TABLE IF NOT EXISTS`
+同一个口径）—— 既有行一行不动，上面那两条命令因此直接就能跑。
+**别删库重建**：原始 JSONL 是账本，但索引行（封存摘要、采集会话、切片与报告的溯源）
+删了就补不回来（没有从 `raw/` 重建索引的命令，`contribution` / `rebuild` / `verify-sources`
+全靠那些行）。
+
+**归档件坏了会怎样**：`archive --verify` 报「归档件自身摘要不一致（存储/传输损坏）」
+非零退出；`archive --retrieve` **拒交**同一句人话（退出码 2）而不是抛压缩器的异常 ——
+在线件还在时更坏的情况已被挡在归档那一步（压缩后解压对不上就丢弃归档件、保留在线件）。
+
 ### 统计门槛怎么调（T4）
 
 门槛（灰信号 N/M/K、终局信号阈值、边界复核门槛）都在 `config` 表，改动留审计：

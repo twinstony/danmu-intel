@@ -177,6 +177,47 @@ def test_db_connect_is_idempotent(tmp_path):
     conn.close()
 
 
+# T1–T12 口径的 `danmu_segments`（没有 T13 的归档两列）——仓库外的真实数据目录就是这样
+LEGACY_SEGMENTS_DDL = """
+CREATE TABLE danmu_segments(
+  id INTEGER PRIMARY KEY, room_session_id INTEGER NOT NULL,
+  rel_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL,
+  first_ts INTEGER, last_ts INTEGER, msg_count INTEGER NOT NULL, sealed_at INTEGER);
+"""
+
+
+def test_open_db_adds_the_columns_later_layers_introduced(data_root):
+    """旧库（数据目录在仓库外、是活账本）就地补齐新增列：不裸崩、不丢行。
+
+    `CREATE TABLE IF NOT EXISTS` 对已存在的表不补列 —— 若不在打开时补齐，T13 的归档
+    在任何 T1–T12 时代的库上每次调用都 `no such column: archived_at`，而且没有过渡路径。
+    """
+    legacy = sqlite3.connect(paths.db_path())
+    legacy.executescript(LEGACY_SEGMENTS_DDL)
+    legacy.execute(
+        "INSERT INTO danmu_segments(room_session_id, rel_path, sha256, first_ts, last_ts, msg_count, sealed_at)"
+        " VALUES(1, 'raw/huya/2026-09-22/660000-16.jsonl', 'deadbeef', 1, 2, 3, 4)"
+    )
+    legacy.commit()
+    legacy.close()
+
+    conn = open_db(paths.db_path())
+    try:
+        row = conn.execute("SELECT * FROM danmu_segments").fetchone()
+        assert row["rel_path"] == "raw/huya/2026-09-22/660000-16.jsonl"
+        assert row["sha256"] == "deadbeef" and row["msg_count"] == 3  # 既有行一行不动
+        assert row["archived_at"] is None and row["archive_sha256"] is None  # 新列补上了
+    finally:
+        conn.close()
+
+    again = open_db(paths.db_path())  # 幂等：再打开不会重复补列（duplicate column name）
+    try:
+        columns = [item[1] for item in again.execute("PRAGMA table_info(danmu_segments)")]
+        assert columns.count("archived_at") == 1 and columns.count("archive_sha256") == 1
+    finally:
+        again.close()
+
+
 def test_matches_roundtrip(conn):
     match_id = create_match(
         conn,

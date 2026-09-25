@@ -19,7 +19,8 @@
 
 异常一律不静默：索引里的在线件找不到、摘要不一致、`raw/` 里超期却**没进索引**的文件，
 都进 `ArchiveRun.anomalies` 并让命令非零退出 —— 由人看一眼再决定，而不是悄悄删掉
-或悄悄留在在线盘上。
+或悄悄留在在线盘上。归档件坏的两种情形（取回时、写完后校验时）同样交人处置：
+拒交 / 丢弃归档件并保留在线件，都给人话，不把压缩器的裸异常冒到命令行上。
 """
 
 from __future__ import annotations
@@ -244,7 +245,12 @@ def _archive_one(
     artifact = evidence.resolve(archive_rel_path, data_root=data_root)
     online_bytes = online.stat().st_size
     archive_bytes = evidence.compress_file(online, artifact)
-    if evidence.content_sha256(artifact) != segment.sha256:
+    try:
+        digest = evidence.content_sha256(artifact)
+    except evidence.DamagedArtifact as exc:
+        artifact.unlink(missing_ok=True)
+        raise ArchiveRefused(segment.rel_path, f"归档件写坏了（{exc}；已丢弃归档件）")
+    if digest != segment.sha256:
         artifact.unlink(missing_ok=True)
         raise ArchiveRefused(segment.rel_path, "归档件解压后与封存摘要不一致（已丢弃归档件）")
 
@@ -350,6 +356,17 @@ def verify(conn: sqlite3.Connection, *, data_root: Path | None = None) -> tuple[
     return tuple(problems)
 
 
+def _index_row(conn: sqlite3.Connection, rel_path: str):
+    """按证据的**两个地址**查索引行：调用方给的可能是报告里冻结的在线地址，也可能是归档地址
+    （归档后索引行存的是归档地址）。只按给的那个地址查，归档后就谁也对不上，
+    校验会静默跳过 —— 拒交这类防线一旦空转，比没有更坏。
+    """
+    return conn.execute(
+        "SELECT sha256, archive_sha256 FROM danmu_segments WHERE rel_path IN (?, ?)",
+        (evidence.online_rel_path(rel_path), evidence.archive_rel_path(rel_path)),
+    ).fetchone()
+
+
 def retrieve(
     conn: sqlite3.Connection, rel_path: str, *, data_root: Path | None = None
 ) -> tuple[Path, bytes]:
@@ -357,16 +374,23 @@ def retrieve(
 
     取回的是**未压缩字节**（与采集时逐字节相同，行号也相同），因此归档件可以
     直接喂给读原始记录的任何路径（统计重算、人工复核、导出）。
+
+    归档件先把**自身字节**的摘要对一次（ADR-0021 决策 9：对不上就拒交）：文件被
+    截断/被改时在解压**之前**就拒绝，因此用户看到的是一句人话（“存储/传输损坏”），
+    而不是压缩器的裸异常（`evidence.read_bytes` 里的 `DamagedArtifact` 是兜底，
+    盖住索引行缺失或没有 `archive_sha256` 的情况）。
     """
-    root_path = data_root or paths.data_dir()
-    path = evidence.locate(rel_path, data_root=root_path)
+    path = evidence.locate(rel_path, data_root=data_root or paths.data_dir())
     if not path.exists():
         raise LookupError(f"证据文件不存在：{rel_path}（在线与归档位置都没有）")
+    row = _index_row(conn, rel_path)
+    if row is not None and evidence.is_archive(path.name):
+        if row["archive_sha256"] is not None and row["archive_sha256"] != evidence.stored_sha256(path):
+            raise ValueError(
+                f"归档件自身摘要不一致（存储/传输损坏）：{rel_path}（拒绝交出可疑证据；"
+                "用 archive --verify 复核）"
+            )
     content = evidence.read_bytes(path)
-    row = conn.execute(
-        "SELECT sha256 FROM danmu_segments WHERE rel_path IN (?, ?)",
-        (rel_path, evidence.online_rel_path(rel_path)),
-    ).fetchone()
     if row is not None and hashlib.sha256(content).hexdigest() != row["sha256"]:
         raise ValueError(f"内容与封存摘要不一致：{rel_path}（拒绝交出可疑证据）")
     return path, content

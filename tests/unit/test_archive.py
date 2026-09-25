@@ -202,6 +202,25 @@ def test_run_discards_the_artifact_when_it_cannot_be_verified(conn, data_root, m
     assert (data_root / OLD).exists() and not (data_root / OLD_ARCHIVED).exists()
 
 
+def test_run_discards_an_artifact_it_cannot_even_decompress(conn, data_root, monkeypatch):
+    """写完就解不开（NAS 上写坏了/截断了）：同样丢归档件、留在线件、记异常继续。"""
+    index_file(conn, data_root, OLD)
+    monkeypatch.setattr(
+        evidence, "compress_file", lambda source, target, **kw: _unreadable_artifact(target)
+    )
+
+    result = archive.run(conn, actor="归档器", cutoff=CUTOFF, data_root=data_root, allow_same_disk=True)
+    assert len(result.anomalies) == 1 and "归档件写坏了" in result.anomalies[0].reason
+    assert (data_root / OLD).exists() and not (data_root / OLD_ARCHIVED).exists()
+    assert row_of(conn, OLD)["archived_at"] is None
+
+
+def _unreadable_artifact(target: Path) -> int:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(b"half a frame")
+    return target.stat().st_size
+
+
 def _bad_artifact(source: Path, target: Path) -> int:
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_bytes(zstd.compress(b"not the same content\n"))
@@ -287,6 +306,36 @@ def test_retrieve_refuses_a_missing_or_tampered_segment(conn, data_root):
 
     (data_root / OLD).write_text("被改过\n", encoding="utf-8")
     with pytest.raises(ValueError, match="与封存摘要不一致"):
+        archive.retrieve(conn, OLD, data_root=data_root)
+
+
+def test_retrieve_refuses_a_corrupt_archive_artifact(conn, data_root):
+    """归档件本身损坏（尾部被追加/截断）：拒交 + 人话，两种地址都拦得住。
+
+    ADR-0021 决策 9「取回前先对封存值，对不上就拒交」正是为这个场景写的 ——
+    压缩器自己的 `ZstdError` 不是给用户看的东西。
+    """
+    index_file(conn, data_root, OLD)
+    archive.run(conn, actor="归档器", cutoff=CUTOFF, data_root=data_root, allow_same_disk=True)
+    artifact = data_root / OLD_ARCHIVED
+    with artifact.open("ab") as handle:
+        handle.write(b'{"ts":1}\n')
+
+    assert "归档件自身摘要不一致" in archive.verify(conn, data_root=data_root)[0].reason
+    for address in (OLD, OLD_ARCHIVED):
+        with pytest.raises(ValueError, match="归档件自身摘要不一致（存储/传输损坏）"):
+            archive.retrieve(conn, address, data_root=data_root)
+
+
+def test_retrieve_reports_a_corrupt_artifact_without_an_index_row(conn, data_root):
+    """索引行不在（或没有 `archive_sha256`）时，解压失败也不能是压缩器的裸异常。"""
+    index_file(conn, data_root, OLD)
+    archive.run(conn, actor="归档器", cutoff=CUTOFF, data_root=data_root, allow_same_disk=True)
+    (data_root / OLD_ARCHIVED).write_bytes(b"not a zstd stream")
+    conn.execute("UPDATE danmu_segments SET archive_sha256=NULL WHERE rel_path=?", (OLD_ARCHIVED,))
+    conn.commit()
+
+    with pytest.raises(evidence.DamagedArtifact, match="归档件解压失败"):
         archive.retrieve(conn, OLD, data_root=data_root)
 
 

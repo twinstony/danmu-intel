@@ -93,6 +93,43 @@ def test_archive_retrieve_writes_to_stdout_or_a_file(conn, data_root, capsys, tm
     assert "证据文件不存在" in capsys.readouterr().err
 
 
+def test_archive_retrieve_refuses_a_damaged_artifact_with_a_non_zero_exit(conn, data_root, capsys):
+    """归档件损坏时给人话拒交（不是压缩器的 traceback），退出码非零。"""
+    index_file(conn, data_root, OLD)
+    main(["archive", "--cutoff", CUTOFF.isoformat(), "--allow-same-disk"])
+    capsys.readouterr()
+    artifact = data_root / OLD_ARCHIVED
+    with artifact.open("ab") as handle:
+        handle.write(b'{"ts":1}\n')
+
+    assert main(["archive", "--retrieve", OLD]) == 2
+    captured = capsys.readouterr()
+    assert captured.out == ""  # 一个字都不输出：不要把可疑证据吐到标准输出
+    assert "错误：归档件自身摘要不一致（存储/传输损坏）" in captured.err
+    assert "拒绝交出可疑证据" in captured.err and "用 archive --verify 复核" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_archive_cli_works_on_a_legacy_data_directory(conn, data_root, capsys):
+    """T1–T12 时代的库（无归档两列）上不裸崩：就地补齐，既有账本一行不动。
+
+    这是本机唯一真实数据目录的形状：不补列的话每次归档都在 `archived_at` 上裸崩，
+    而删库重建会丢掉 matches/slices/metrics/… 与四个 raw 件的索引行。
+    """
+    index_file(conn, data_root, OLD)
+    conn.execute("ALTER TABLE danmu_segments DROP COLUMN archived_at")
+    conn.execute("ALTER TABLE danmu_segments DROP COLUMN archive_sha256")
+    conn.commit()
+    conn.close()
+
+    assert main(["archive", "--cutoff", CUTOFF.isoformat(), "--dry-run"]) == 0
+    assert f"到期 1 个文件" in capsys.readouterr().out
+
+    assert main(["archive", "--cutoff", CUTOFF.isoformat(), "--allow-same-disk"]) == 0
+    assert "已归档 1 个" in capsys.readouterr().out
+    assert (data_root / OLD_ARCHIVED).exists()
+
+
 def test_archive_cli_defaults_to_six_calendar_months(conn, data_root, capsys):
     """不传 `--cutoff` 时用「今天回推 6 个月」；一份两年前的文件因此一定到期。"""
     old = "raw/huya/2024-01-05/660000-09.jsonl"
