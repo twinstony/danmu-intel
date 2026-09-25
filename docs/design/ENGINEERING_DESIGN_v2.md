@@ -143,6 +143,11 @@
 
 **明确不引入**：不引入前端框架/构建链、不引入消息队列、不引入 Redis、不引入 ORM（用 stdlib `sqlite3` + 手写 SQL）、不引入加速层（需求 Q-3 已拍板）、不引入容器（单机 systemd 直接跑）。
 
+> **落地修正**：语言行写的是「Python 3.11」，而运行环境是 **Python 3.14**（`python3 -V` = 3.14.4）：
+> 后台实际用 `aiohttp` 而不是 FastAPI/Jinja2（ADR-0020），归档压缩用 stdlib `compression.zstd`
+> 而不是第三方 `zstandard`（ADR-0021），不引入新依赖的底线因此保持，代价是
+> `requires-python >= 3.14`。
+
 ---
 
 ## 5. 数据模型
@@ -174,8 +179,11 @@ CREATE TABLE room_sessions(     -- 一次采集会话（进程级）
 
 CREATE TABLE danmu_segments(    -- 落盘文件索引（证据链）
   id INTEGER PRIMARY KEY, room_session_id INTEGER NOT NULL,
-  rel_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL,
-  first_ts INTEGER, last_ts INTEGER, msg_count INTEGER NOT NULL, sealed_at INTEGER);
+  rel_path TEXT NOT NULL UNIQUE, -- 证据当前在哪（归档后 = archive/…jsonl.zst，ADR-0021）
+  sha256 TEXT NOT NULL,          -- 内容摘要（未压缩字节），归档前后不变（封存值）
+  first_ts INTEGER, last_ts INTEGER, msg_count INTEGER NOT NULL, sealed_at INTEGER,
+  archived_at INTEGER,           -- NULL = 仍在线（T13）
+  archive_sha256 TEXT);          -- 归档件自身字节的摘要（T13）
 ```
 
 **切片与统计**
@@ -312,6 +320,16 @@ CREATE TABLE config(            -- 后台可视化配置（≤60s 生效）
 | 原始弹幕 JSONL | 6 个月（需求 NFR-D） | 压缩为 `.jsonl.zst` 迁至 NAS，DB 索引行保留（rel_path 改指向归档挂载点） |
 | 切片/统计/报告/订单/会员/审计 | 长期 | 不删（报告与订单是账本） |
 | 统计原始事件 | 90 天 | 汇总入 `stats_daily` 后删除明细 |
+
+> **落地（T13，见 ADR-0021）**：NAS 由**挂载点**接入 —— 把共享挂到 `<data>/archive`，
+> 归档根默认必须是独立挂载点（`st_dev` 不同），否则归档命令拒绝执行（`--allow-same-disk`
+> 只给演练/测试）；压缩用 stdlib `compression.zstd`（Python 3.14 起自带），因此
+> `requires-python >= 3.14`（本项目运行环境就是 3.14）。索引行的 `rel_path` 归档后指向
+> `archive/…jsonl.zst`，而 `sha256` **仍是压缩前的整文件摘要**（封存值）；两个地址
+> （`raw/A.jsonl` ↔ `archive/A.jsonl.zst`）互为纯函数，所以报告里冻结的在线引用在归档后
+> 照样复核得过（NFR-D-4），发布检查不受影响。归档只碰 `danmu_segments` 与 `audit_log`
+> （切片/统计/报告/订单/会员/审计长期不删）；统计明细的 90 天汇总仍是 T10 的
+> `site-stats --prune`。
 
 ---
 

@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "danmu-intel"
 version = "0.1.0"
 description = "弹幕情报库：采集 → 切片 → 规则统计 → 静态报告页"
-requires-python = ">=3.11"
+requires-python = ">=3.14"   # 归档压缩用 stdlib `compression.zstd`（3.14 起自带，见 ADR-0021）
 dependencies = ["aiohttp>=3.9"]
 
 [project.optional-dependencies]
