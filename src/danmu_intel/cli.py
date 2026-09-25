@@ -461,11 +461,14 @@ def _cmd_notify(args: argparse.Namespace) -> int:
         config = load_notify_config(conn)
         try:
             channels = channels_from_credentials()
-        except ChannelNotConfigured as exc:
+        except (ChannelNotConfigured, CredentialError) as exc:
             print(f"错误：{exc}", file=sys.stderr)
             return 2
         if args.loop:
+
             def report(result) -> None:
+                if not result.outcomes:  # 空扫一轮不进日志：journal 里只留真事
+                    return
                 print(result.summary())
                 for outcome in result.outcomes:
                     print(_outcome_line(outcome))
