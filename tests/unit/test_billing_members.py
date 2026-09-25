@@ -114,6 +114,33 @@ def test_sweep_walks_active_to_grace_to_expired(conn):
     assert actions.count(members.MEMBER_EXPIRED) == 1
 
 
+def test_sweep_is_quiet_when_nothing_changes(conn):
+    member = members.get_or_create_member(conn, platform="qq", username="12345678", tier="trial", now=BASE_MS)
+    members.grant(conn, member_id=member.id, tier="trial", tx_ref="0x1", now=BASE_MS)
+    expires_at = BASE_MS + 3 * DAY
+    members.sweep(conn, now=expires_at + 1)  # → grace
+    assert members.sweep(conn, now=expires_at + 2) == []  # 已经是 grace：不再重复改
+    assert members.sweep(conn, now=expires_at - DAY) == []
+
+
+def test_tier_field_validation():
+    with pytest.raises(pricing.BillingConfigError, match="必须有 key"):
+        pricing.Tier(key="", label="", amount_units=1, days=1)
+    with pytest.raises(pricing.BillingConfigError, match="未知的档位字段"):
+        pricing.Tier.from_dict({"key": "x", "label": "X", "amount_units": 1, "days": 1, "vip": True})
+    with pytest.raises(pricing.BillingConfigError, match="缺少字段"):
+        pricing.Tier.from_dict({"key": "x", "label": "X"})
+    with pytest.raises(pricing.BillingConfigError, match="档位 key 重复"):
+        pricing.BillingConfig.from_dict(
+            {
+                "tiers": [
+                    {"key": "x", "label": "X", "amount_units": 1, "days": 1},
+                    {"key": "x", "label": "X2", "amount_units": 2, "days": 2},
+                ]
+            }
+        )
+
+
 def test_revoke_needs_a_reason_and_is_audited(conn):
     member = members.get_or_create_member(conn, platform="qq", username="12345678", tier="standard", now=BASE_MS)
     with pytest.raises(MemberError, match="理由"):

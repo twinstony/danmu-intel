@@ -88,15 +88,11 @@ def keccak256(data: bytes) -> bytes:
         for lane in range(_RATE // 8):
             state[lane] ^= int.from_bytes(block[lane * 8 : lane * 8 + 8], "little")
         _keccak_f(state)
-    output = bytearray()
-    while len(output) < 32:
-        for lane in range(_RATE // 8):
-            output.extend(state[lane].to_bytes(8, "little"))
-            if len(output) >= 32:
-                break
-        if len(output) < 32:
-            _keccak_f(state)
-    return bytes(output[:32])
+    # 速率（136 字节）大于输出长度（32 字节）：挤出一次就够，不需要第二轮置换
+    squeezed = bytearray()
+    for lane in range(_RATE // 8):
+        squeezed.extend(state[lane].to_bytes(8, "little"))
+    return bytes(squeezed[:32])
 
 
 # —— secp256k1（只有点加与标量乘：够算公钥，不够签任何东西）——
@@ -158,11 +154,6 @@ def scalar_mult(scalar: int, point: Point | None = None) -> Point | None:
     return result
 
 
-def on_curve(point: Point) -> bool:
-    x, y = point
-    return (y * y - x * x * x - 7) % _FIELD_PRIME == 0
-
-
 def decompress(public_key: bytes) -> Point:
     """33 字节压缩公钥（BIP32 xpub 里的形状）→ 仿射坐标点。"""
     if len(public_key) != 33 or public_key[0] not in (2, 3):
@@ -176,10 +167,7 @@ def decompress(public_key: bytes) -> Point:
         raise CurveError("压缩公钥不在 secp256k1 曲线上")
     if (y & 1) != (public_key[0] & 1):
         y = _FIELD_PRIME - y
-    point = (x, y)
-    if not on_curve(point):
-        raise CurveError("压缩公钥不在 secp256k1 曲线上")
-    return point
+    return x, y
 
 
 def compress(point: Point) -> bytes:

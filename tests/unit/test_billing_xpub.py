@@ -137,7 +137,6 @@ def test_secp256k1_edge_cases():
     assert crypto.point_add(generator, None) == generator
     assert crypto.point_add(generator, generator) == crypto.scalar_mult(2)  # 倍点路径
     assert crypto.point_add(generator, crypto.negate(generator)) is None  # 互为逆元
-    assert crypto.on_curve(generator)
 
     with pytest.raises(CurveError, match="33 字节"):
         crypto.decompress(b"\x02" * 32)
@@ -254,3 +253,35 @@ def test_checksum_address_follows_eip55_and_refuses_garbage():
         xpub.to_checksum_address("0x1234")
     with pytest.raises(XpubError, match="不是合法的以太坊地址"):
         xpub.to_checksum_address("0x" + "z" * 40)
+
+
+def test_extended_key_fields_are_validated_on_construction():
+    key = xpub.parse_xpub(ACCOUNT_XPUB)
+    with pytest.raises(XpubError, match="链码必须是 32 字节"):
+        xpub.ExtendedPublicKey(
+            version=key.version, depth=0, parent_fingerprint=b"\x00" * 4, index=0,
+            chain_code=b"short", public_key=key.public_key,
+        )
+    with pytest.raises(XpubError, match="父指纹必须是 4 字节"):
+        xpub.ExtendedPublicKey(
+            version=key.version, depth=0, parent_fingerprint=b"", index=0,
+            chain_code=key.chain_code, public_key=key.public_key,
+        )
+    with pytest.raises(crypto.CurveError, match="不在 secp256k1 曲线上"):
+        xpub.ExtendedPublicKey(
+            version=key.version, depth=0, parent_fingerprint=b"\x00" * 4, index=0,
+            chain_code=key.chain_code, public_key=b"\x02" + b"\x00" * 32,
+        )
+    assert key.checksum_address().lower() == key.address()  # 显示用校验和地址
+
+
+def test_payload_shapes_are_refused():
+    key = xpub.parse_xpub(ACCOUNT_XPUB)
+    raw = crypto.b58decode(ACCOUNT_XPUB)
+    with pytest.raises(XpubError, match="78 字节"):
+        xpub.parse_xpub(crypto.b58encode(raw[:40]))
+    # 公钥首字节为 0：扩展密钥里裹着私钥
+    tampered = raw[:45] + b"\x00" + raw[46:]
+    with pytest.raises(XpubError, match="裹着私钥"):
+        xpub.parse_xpub(crypto.b58encode(tampered))
+    assert key.index == xpub.HARDENED  # 账户层的索引本身是硬化索引（m/44'/60'/0'）

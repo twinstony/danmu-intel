@@ -241,3 +241,21 @@ def test_order_display_fields(conn, config):
     assert body["amount"] == order.amount_display and body["memo"] == order.public_ref
     assert order.shortage_display == "0.00"
     assert body["status"] == "pending"
+
+
+def test_get_order_by_unknown_id(conn, config):
+    with pytest.raises(LookupError, match="未找到订单"):
+        orders.get_order(conn, order_id=4242)
+
+
+def test_public_ref_collision_is_a_loud_failure(conn, config, monkeypatch):
+    monkeypatch.setattr(orders.secrets, "token_hex", lambda n: "AB" * n)
+    orders.create_order(
+        conn, platform="qq", username="12345678", tier="standard", network="polygon",
+        now=BASE_MS, config=config,
+    )
+    with pytest.raises(OrderError, match="生成订单引用失败"):
+        orders.create_order(
+            conn, platform="qq", username="87654321", tier="standard", network="polygon",
+            now=BASE_MS, config=config,
+        )

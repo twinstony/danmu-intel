@@ -254,3 +254,13 @@ def test_credentials_die_with_the_member_lookup(conn, config):
     conn.commit()
     assert not verify.verify(conn, code=credential).ok
     assert verify.check_credential(conn, credential) is None
+
+
+def test_tier_label_falls_back_when_the_tier_left_the_config(conn, config):
+    """档位被后台改名/删掉后，老会员的响应不能崩（FR-C6-2：改价格不影响已生效的会员）。"""
+    order, token = open_order(conn, config)
+    pay(conn, config, order)
+    conn.execute("UPDATE members SET tier='legacy' WHERE id=?", (order.member_id,))
+    conn.commit()
+    result = claim(conn, config, order, token)
+    assert result.ok and result.body["tier"] == "legacy" and result.body["tier_label"] == "legacy"

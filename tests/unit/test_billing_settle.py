@@ -262,3 +262,32 @@ def test_manual_payment_can_only_short_pay(conn, config):
     )
     assert opened is False and short.status == "short"
     assert short.shortage_units == order.amount_due_units - 1
+
+
+def test_result_summary_counts_outcomes(conn, config):
+    order = make_order(conn, config)
+    result = settle.settle(
+        conn,
+        [polygon_transfer(order), polygon_transfer(order, tx_ref="0xother", address=ADDRESSES[1])],
+        now=BASE_MS + MINUTE,
+        config=config,
+    )
+    assert len(result.duplicates) == 0 and len(result.unmatched) == 1
+    assert "入账 2 笔" in result.summary() and "开通 1 次" in result.summary()
+
+    repeat = settle.settle(conn, [polygon_transfer(order)], now=BASE_MS + 2 * MINUTE, config=config)
+    assert len(repeat.duplicates) == 1 and "重复 1" in repeat.summary()
+
+
+def test_order_is_marked_paid_but_access_is_not_granted_twice(conn, config, monkeypatch):
+    """账要对（订单转 paid）与「有效期不重复累加」是两件事：第二件由幂等键兜住。"""
+    order = make_order(conn, config)
+    real_grant = members.grant
+    monkeypatch.setattr(members, "grant", lambda *args, **kwargs: (real_grant(conn, member_id=order.member_id, tier="standard", tx_ref="0xearlier", now=BASE_MS), False))
+    result = settle.settle(conn, [polygon_transfer(order)], now=BASE_MS + MINUTE, config=config)
+    assert result.granted == [order.member_id]
+    assert orders.get_order(conn, order_id=order.id).status == "paid"
+    assert any(
+        item.kind == settle.PAYMENT_EXTRA and item.payload.get("repeat_grant")
+        for item in recent(conn)
+    )
