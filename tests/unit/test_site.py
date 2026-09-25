@@ -147,6 +147,7 @@ def test_site_tree_contains_every_declared_artifact(ledger, site_root):
     } <= paths
     for path, html in build.tree.files().items():
         assert html.startswith("<!DOCTYPE html>"), path
+        # 没配 API 基址：静态站保持零脚本（自建 beacon 也不写，见下一个测试）
         assert "<script" not in html, path
         # 无外部请求（NFR-P-3）：不加载任何站外资源、不引第三方脚本。
         # 订阅页会写出**我们自己那台机器**的 API 基址（绝对 URL，用户要拿它调接口），
@@ -154,6 +155,36 @@ def test_site_tree_contains_every_declared_artifact(ledger, site_root):
         assert not re.search(r'(?:src|href)="https?://', html), path
         if path != "subscribe.html":
             assert "http://" not in html and "https://" not in html, path
+
+
+def test_site_pages_report_their_visit_to_our_own_api(ledger):
+    """配了 API 基址后，每页带一个**自建** beacon（自己那台 API，无第三方、无 cookie）。"""
+    from danmu_intel.billing import pricing
+
+    publish_forms(ledger)
+    pricing.save_billing_config(
+        ledger.conn, actor="管理员", changes={"api_base": "https://host.ts.net:8443/"}
+    )
+    build = build_site(ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT)
+    for page in build.tree.pages:
+        html = page.html
+        assert html.count("<script") == 1, page.path
+        assert "<script src=" not in html, page.path  # 没有外部脚本
+        assert 'navigator.sendBeacon("https://host.ts.net:8443/api/stats/beacon"' in html, page.path
+        assert f'page:"{page.path}"' in html, page.path
+        # 只打自己那台机器：页面上的 http(s) 地址只有这一个（订阅页另有接口说明）
+        if page.path != "subscribe.html":
+            assert html.count("https://") == 1, page.path
+
+
+def test_no_beacon_when_the_api_base_is_not_configured(ledger):
+    """宁可不统计，也不往不知道的地址发请求：没配基址就不写脚本。"""
+    from danmu_intel.billing import pricing
+
+    publish_forms(ledger)
+    pricing.save_billing_config(ledger.conn, actor="管理员", changes={"api_base": ""})
+    build = build_site(ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT)
+    assert all("sendBeacon" not in page.html for page in build.tree.pages)
 
 
 def test_navigation_is_the_same_on_every_page_and_every_link_lands(ledger):

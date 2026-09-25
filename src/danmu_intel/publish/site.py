@@ -19,7 +19,9 @@
 1. **页面只由库里的事实汇总**，没有数据就不造页（选手页只在官方阵容存在时生成）；
 2. **导航是同一组固定栏目**（`NAV_ITEMS`，值是**相对站点根**的目标路径），
    页面渲染时换算成相对本页的链接（`relative_href`）；
-3. 无脚本、无外部字体、无第三方请求（NFR-A-2 / NFR-P-3）：页面上只有 HTML + 内联样式。
+3. **无第三方**（NFR-A-2 / NFR-P-3）：页面只有 HTML + 内联样式，唯一的脚本是**自建 beacon**
+   —— 一行内联脚本，向自己的 API（`billing.api_base`）报一次页面访问，不带任何第三方地址；
+   **没配 API 基址就不写脚本**，静态站仍然是零脚本。
 """
 
 from __future__ import annotations
@@ -29,7 +31,7 @@ import json
 import posixpath
 import re
 import sqlite3
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 from html import escape
 from pathlib import Path
@@ -42,6 +44,7 @@ from danmu_intel.report.forms import form_of
 from danmu_intel.report.html import CSS as REPORT_CSS
 from danmu_intel.report.html import render_report_html
 from danmu_intel.report.rule_render import format_ts
+from danmu_intel.site_stats import beacon as site_beacon
 from danmu_intel.stats.gray import GraySample, GraySignal, STATUS_CANDIDATE
 
 #: 取报告的形态顺序（页面上的固定排列）。
@@ -399,7 +402,8 @@ def _layout(page_path: str, title: str, body: str, *, subtitle: str = "") -> str
 <main>
 {body}
 </main>
-<footer>本站不加载任何第三方脚本、字体或统计；页面内容由公开弹幕与官方数据汇总而成。</footer>
+<footer>本站不加载任何第三方脚本、字体或统计；访问统计由本站自建（不跨站跟踪、不交第三方）。
+页面内容由公开弹幕与官方数据汇总而成。</footer>
 </body>
 </html>
 """
@@ -517,7 +521,7 @@ def _render_history(facts: SiteFacts) -> str:
         page_path,
         "历史情报库",
         body,
-        subtitle="静态站不加载脚本：检索即「按日期 / 联赛 / 队伍 / 比赛」四个入口分面浏览",
+        subtitle="静态站不加载第三方脚本：检索即「按日期 / 联赛 / 队伍 / 比赛」四个入口分面浏览",
     )
 
 
@@ -1125,4 +1129,25 @@ def _build_tree(facts: SiteFacts) -> SiteTree:
             nav=NAV_ITEMS,
         )
     )
-    return SiteTree(tuple(pages))
+    return SiteTree(_with_beacon(pages, facts.api_base))
+
+
+def _with_beacon(pages: list[SitePage], api_base: str) -> tuple[SitePage, ...]:
+    """给每个页面注入自建 beacon（没配 API 基址时原样返回，页面保持零脚本）。
+
+    注入点在**站点树这一层**（而不是每个渲染器里）：一次发布写出的每一页都带上它，
+    报告页（由 `report/html.py` 渲染）也不例外 —— 付费页访问量正是靠这条上报算出来的。
+    """
+    if not api_base:
+        return tuple(pages)
+    return tuple(
+        replace(page, html=_inject_beacon(page.html, site_beacon.snippet(page.path, api_base)))
+        for page in pages
+    )
+
+
+def _inject_beacon(html: str, snippet: str) -> str:
+    """把 beacon 放在 `</body>` 之前；渲染器改了结构就报错，而不是静默丢掉统计。"""
+    if "</body>" not in html:
+        raise ValueError("页面缺少 </body>：beacon 注入点不存在（渲染器变了？）")
+    return html.replace("</body>", f"{snippet}\n</body>", 1)

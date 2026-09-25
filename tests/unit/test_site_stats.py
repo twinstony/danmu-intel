@@ -279,3 +279,27 @@ def test_paywall_vocabulary_is_the_only_visibility_source(conn):
     """付费页口径与 `common.paywall` 同源：不在这里另立一套词。"""
     assert paywall.VISIBILITY_PAID in paywall.VISIBILITIES
     assert daily.DETAIL_RETENTION_DAYS == 90
+
+
+# —— 页面上的一行脚本：自建 beacon ——
+
+
+def test_snippet_targets_our_own_api_and_carries_only_the_page_path():
+    script = beacon.snippet("matches/7/full.html", "https://host.ts.net:8443/")
+    assert script.startswith("<script>navigator.sendBeacon(")
+    assert '"https://host.ts.net:8443/api/stats/beacon"' in script  # 尾部斜杠不双写
+    assert 'page:"matches/7/full.html"' in script
+    assert "http" not in script.replace('"https://host.ts.net:8443/api/stats/beacon"', "")  # 没有第二个地址
+    assert "document.cookie" not in script and "referrer" not in script
+
+
+def test_snippet_is_absent_without_an_api_base():
+    assert beacon.snippet("index.html", "") == ""
+    assert beacon.snippet("index.html", "   ") == ""
+
+
+def test_snippet_breaks_the_script_tag_escape_hatch():
+    """拼进去的值不能提前关掉 `<script>`（配置是运维给的，但脚本必须自己兜住）。"""
+    script = beacon.snippet("index.html", "https://host.ts.net:8443/</script><b>x</b>")
+    assert "</script>" not in script[:-len("</script>")]
+    assert "\\u003c" in script

@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import secrets
 import sqlite3
@@ -100,6 +101,32 @@ def page_visibility(conn: sqlite3.Connection, page: str) -> str:
 
 def is_paid_page(conn: sqlite3.Connection, page: str) -> bool:
     return page_visibility(conn, page) == paywall.VISIBILITY_PAID
+
+
+#: 上报路径（挂在对外 API 基址下：`<api_base>/api/stats/beacon`）。
+BEACON_PATH = "/api/stats/beacon"
+
+
+def _js_string(value: str) -> str:
+    """嵌进 `<script>` 的字符串：JSON 转义 + 断掉 `</script>` 这条路。"""
+    return json.dumps(value, ensure_ascii=False).replace("<", "\\u003c")
+
+
+def snippet(page_path: str, api_base: str) -> str:
+    """页面上的自建 beacon：一行内联脚本，向**自己的** API 报一次页面访问。
+
+    - 没配 API 基址就**不写脚本**：宁可不统计，也不往不知道的地址发请求，
+      静态站因此保持零脚本（NFR-A-2）；
+    - `navigator.sendBeacon` 送的是 `text/plain`（跨源也免预检），响应被丢弃
+      —— 统计不需要回执，也不给页面任何可读的返回；
+    - 脚本里只有自己的地址与**页面路径**：不带 referrer、不带 cookie 之外的信息，
+      更没有任何第三方地址（FR-C7-4 / NFR-P-3）。
+    """
+    if not api_base.strip():
+        return ""
+    target = f"{api_base.rstrip('/')}{BEACON_PATH}"
+    payload = "{" + f"page:{_js_string(page_path)}" + "}"
+    return f"<script>navigator.sendBeacon({_js_string(target)}, JSON.stringify({payload}));</script>"
 
 
 def record(
