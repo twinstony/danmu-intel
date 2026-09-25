@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import logging
 import sys
@@ -1054,6 +1055,26 @@ def _cmd_chain_usage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin_passwd(args: argparse.Namespace) -> int:
+    """设/改后台口令：只把 **PBKDF2 哈希**写进仓库外 `.env`（0600），明文不落盘。"""
+    from danmu_intel.admin import auth
+
+    target = paths.env_path()
+    first = getpass.getpass(f"新后台口令（写入 {target}）：")
+    second = getpass.getpass("再输一次：")
+    if first != second:
+        print("错误：两次输入不一致", file=sys.stderr)
+        return 2
+    try:
+        auth.save_password(target, first)
+    except (auth.AuthError, CredentialError) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+    print(f"已写入后台口令哈希：{target}（0600；明文没有落盘）")
+    print("起后台：danmu-intel admin --host <tailscale ip -4> --port 8090")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→报告三形态）")
     parser.add_argument("--verbose", action="store_true", help="打印重连等运行日志")
@@ -1252,6 +1273,9 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认只监听本机，公网靠 Funnel）")
     serve.add_argument("--port", type=int, default=8080)
     serve.set_defaults(func=_cmd_serve)
+
+    admin_passwd = sub.add_parser("admin-passwd", help="设/改后台口令（只写哈希进仓库外 .env）")
+    admin_passwd.set_defaults(func=_cmd_admin_passwd)
 
     site_stats = sub.add_parser(
         "site-stats", help="站点统计：某天的访问量/付费页人数/下单转化/留资（--prune 做 90 天保留）"
