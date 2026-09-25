@@ -113,8 +113,9 @@ def child_invocation(
 ) -> tuple[list[str], dict[str, str]]:
     """子进程命令行与环境（纯函数，便于断言；真拉起是 `subprocess.Popen`）。
 
-    环境里两件事：`DANMU_INTEL_DATA` 让父子写同一个数据目录，
-    `DANMU_INTEL_SUPERVISION` 把重启次数与累计重连数接力给子进程。
+    环境里三件事：`DANMU_INTEL_DATA` 让父子写同一个数据目录，
+    `DANMU_INTEL_SUPERVISION` 把重启次数与累计重连数接力给子进程，
+    `PYTHONPATH` 把父进程找到 `danmu_intel` 的那个目录接力给子进程。
     """
     command = [
         python or sys.executable,
@@ -131,7 +132,24 @@ def child_invocation(
     environment = dict(os.environ)
     environment.update(supervision_env(Supervision(run.restarts, run.reconnects)))
     environment[paths.DATA_DIR_ENV] = str(data_root)
+    _inherit_import_path(environment)
     return command, environment
+
+
+def _inherit_import_path(environment: dict[str, str]) -> None:
+    """把「父进程是从哪儿 import 到 `danmu_intel` 的」递进子进程环境（就地改）。
+
+    子进程是全新解释器，只继承环境变量、不继承 `sys.path`。装好包的生产环境不需要它，
+    但**源树里跑**（`pytest` 的 `pythonpath=src`、`python -m danmu_intel`）时父进程的
+    `sys.path` 是唯一线索 —— 不递过去，子进程会当场 `No module named danmu_intel` 退出，
+    然后被当成故障反复重拉，真故障反而淹没在噪声里。
+    """
+    package = sys.modules.get(CHILD_MODULE)
+    if package is None or not getattr(package, "__file__", None):
+        return
+    search = str(Path(package.__file__).resolve().parent.parent)
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = f"{search}{os.pathsep}{existing}" if existing else search
 
 
 def popen(command: list[str], environment: dict[str, str]) -> ChildProcess:
