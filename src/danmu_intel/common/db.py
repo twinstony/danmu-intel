@@ -13,6 +13,9 @@ T4 加 `gray_signals`（灰信号，含类别与作废原因）、`audit_log`（
 T9 加 `members` / `orders` / `order_payments` / `member_credentials` / `rate_limits`
 （会员付费全自助闭环：会员状态机、订单状态机、逐笔入账幂等、凭据只存哈希、限流桶）。
 
+T10 加 `stats_events`（站点统计明细：只有每日盐下的访客哈希，**没有 IP / UA / 身份**）、
+`stats_daily`（日汇总：明细 90 天到期后唯一留存的口径）与 `stats_salt`（每日盐，只留当天一行）。
+
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
 """
@@ -162,6 +165,23 @@ CREATE TABLE IF NOT EXISTS member_credentials( -- 会员凭据（**只存哈希*
 
 CREATE TABLE IF NOT EXISTS rate_limits(        -- 限流桶（按 IP 与按账号双维度，NFR-S-2）
   bucket TEXT PRIMARY KEY, window_started_at INTEGER NOT NULL, hits INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS stats_events(      -- 站点统计明细（不含 IP / UA / 联系方式）
+  id INTEGER PRIMARY KEY, day TEXT NOT NULL,  -- 本地日历日（与 chain.quota.day_key 同口径）
+  ts INTEGER NOT NULL, page TEXT NOT NULL,
+  visitor_hash TEXT NOT NULL,                 -- sha256(每日盐 + IP + UA)，跨日不可还原同一人
+  paid INTEGER NOT NULL DEFAULT 0,            -- 访问时该页是否受付费墙保护（状态机判定）
+  member_id INTEGER);                         -- 仅凭据校验通过时记（自愿留资/付费者，AC-9 的「除非」）
+
+CREATE INDEX IF NOT EXISTS stats_events_day ON stats_events(day);
+
+CREATE TABLE IF NOT EXISTS stats_daily(       -- 站点统计日汇总（明细到期后唯一留存的口径）
+  day TEXT PRIMARY KEY, page_views INTEGER NOT NULL, sessions INTEGER NOT NULL,
+  unique_visitors INTEGER NOT NULL, paid_page_views INTEGER NOT NULL,
+  paid_unique_visitors INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS stats_salt(        -- 每日盐（只保留当天一行：旧盐即时丢弃）
+  day TEXT PRIMARY KEY, salt TEXT NOT NULL);
 """
 
 
