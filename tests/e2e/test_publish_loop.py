@@ -79,6 +79,35 @@ def test_publish_no_deploy_then_ended_flips_everything_public(three_game_ledger,
     assert "v2｜live" in listing and "v1｜superseded" in listing and "← 线上" in listing
 
 
+def test_published_pages_carry_the_self_built_beacon_and_still_pass_every_check(
+    three_game_ledger, site_root, capsys
+):
+    """T10：配了 API 基址的线上产物带自建 beacon，7 项检查照样全过、付费正文照样不在静态页里。"""
+    from danmu_intel.billing import pricing
+
+    ledger = three_game_ledger
+    publish_brief(ledger)
+    pricing.save_billing_config(
+        ledger.conn, actor="管理员", changes={"api_base": "https://host.ts.net:8443"}
+    )
+
+    assert main(["publish", "--no-deploy"]) == 0
+    out = capsys.readouterr().out
+    assert out.count("：通过") >= 7 and "：不通过" not in out
+
+    pages = sorted(site_root.rglob("*.html"))
+    assert pages, "产物里应当有页面"
+    for page in pages:
+        html = page.read_text(encoding="utf-8")
+        rel = page.relative_to(site_root).as_posix()
+        assert html.count("<script") == 1, rel
+        assert 'navigator.sendBeacon("https://host.ts.net:8443/api/stats/beacon"' in html, rel
+        assert f'page:"{rel}"' in html, rel  # 报的是这个页面自己的路径
+    paid = (site_root / report_page_path(ledger.match_id, "live_brief")).read_text(encoding="utf-8")
+    assert paywall.PAYWALL_MARK in paid
+    assert "取材范围" not in paid and "解读，非事实" not in paid
+
+
 def test_publish_dry_run_reports_a_defect_without_touching_the_site(three_game_ledger, site_root, capsys):
     ledger = three_game_ledger
     publish_brief(ledger)
