@@ -44,7 +44,8 @@ ADR-0007（后台形态：独立进程、仅 tailnet、单管理员、签名 coo
    **哈希同时是会话签名密钥**——改口令即所有旧会话当场失效，因此不需要第二份秘密。
    cookie 只有「到期时刻 + HMAC 签名」（`v1.<毫秒>.<签名>`，12 小时，HttpOnly +
    SameSite=Lax，经 https 反代时 `--secure-cookie` 加 Secure），登录按 IP 限流
-   （1 分钟 10 次）。登录成功/失败/登出都进 `audit_log`。
+   （1 分钟 10 次）。登录成功/失败/登出都进 `audit_log`。`SameSite=Lax` 同时挡掉了
+   跨站发起的 POST（浏览器不会带上 cookie），因此写操作不需要另加一套 CSRF token。
 5. **tailnet 判两层，取不到对端 IP 就拒绝**：进程绑定时 `require_tailnet_host` 拒绝
    `0.0.0.0`/公网地址（只肯绑 `100.64/10`、`fd7a:115c:a1e0::/48` 或回环）；每个请求
    再判一次对端 IP，非 tailnet 一律 **403**（连登录页都不给看，AC-7）。
