@@ -177,6 +177,12 @@ def test_site_pages_report_their_visit_to_our_own_api(ledger):
             assert html.count("https://") == 1, page.path
 
 
+def test_beacon_injection_fails_loudly_if_a_renderer_drops_the_body_tag():
+    """渲染器改了结构就报错，而不是静默丢掉统计。"""
+    with pytest.raises(ValueError, match="缺少 </body>"):
+        site._inject_beacon("<p>没有 body 的页面</p>", "<script>x</script>")
+
+
 def test_no_beacon_when_the_api_base_is_not_configured(ledger):
     """宁可不统计，也不往不知道的地址发请求：没配基址就不写脚本。"""
     from danmu_intel.billing import pricing

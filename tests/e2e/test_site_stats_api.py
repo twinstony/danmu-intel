@@ -133,12 +133,15 @@ def test_beacon_rejects_non_site_paths(client, conn, payload):
 
 def test_beacon_rejects_a_non_json_body(client, conn):
     async def scenario(http):
-        response = await http.post(
-            "/api/stats/beacon", data="not json", headers={**UA, "Content-Type": "text/plain"}
-        )
-        assert response.status == 400
+        for body in ("not json", "[1, 2]"):
+            response = await http.post(
+                "/api/stats/beacon", data=body, headers={**UA, "Content-Type": "text/plain"}
+            )
+            assert response.status == 400
+            assert "error" in await response.json()
 
     run(client, scenario)
+    assert conn.execute("SELECT COUNT(*) AS n FROM stats_events").fetchone()["n"] == 0
 
 
 def test_beacon_is_rate_limited_per_ip(client, conn, monkeypatch, clock):
