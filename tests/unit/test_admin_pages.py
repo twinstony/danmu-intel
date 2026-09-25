@@ -236,7 +236,30 @@ def test_notifications_page_shows_queue(conn, ctx):
     seed(conn, ctx.conn)
     rendered = render("notifications", ctx)
     assert "process_exit" in rendered and "llm.cost_gate" in rendered
-    assert "属 T11" in rendered, "投递属 T11 这件事必须在页面上说清"
+    assert "danmu-intel notify" in rendered, "投递是谁做的必须在页面上说清"
+    assert "告警台账" in rendered
+
+
+def test_notifications_page_shows_the_alert_ledger(conn, ctx):
+    """通知页的「与告警」那一半：同一件事的发生台账与恢复（ADR-0019）。"""
+    from danmu_intel.notify import suppression
+    from danmu_intel.notify.config import load_notify_config
+
+    seed(conn, ctx.conn)
+    cooldown = load_notify_config(conn).cooldown_ms
+    key = suppression.alert_key("llm.cost_gate", {"match_id": 1})
+    first = suppression.admit(conn, "llm.cost_gate", key=key, at=BASE, cooldown_ms=cooldown)
+    assert first.send is True
+    suppression.note_sent(conn, key, at=BASE)
+    # 冷却期内的第二次发生：留痕不发（页面上要看得见「被冷却压住」）
+    assert suppression.admit(conn, "llm.cost_gate", key=key, at=BASE + 1, cooldown_ms=cooldown).send is False
+    suppression.resolve(conn, "llm.cost_gate", identity={"match_id": 1}, timestamp=BASE + 2)
+
+    rendered = render("notifications", ctx)
+    assert "llm.cost_gate" in rendered
+    assert "已恢复" in rendered, "恢复后台账要显示为已恢复"
+    assert "被冷却压住" in rendered and "重试用尽" in rendered
+    assert f"<td>{2}</td>" in rendered, "同一件事发生了两次要计数"
 
 
 def test_config_page_shows_every_section(conn, ctx):

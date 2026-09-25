@@ -44,6 +44,8 @@ from danmu_intel.common import audit, config_store, gray_review, paywall, rooms
 from danmu_intel.common.config import StatsConfig, load_stats_config
 from danmu_intel.common.matches import MATCH_STATES, list_matches
 from danmu_intel.common.notifications import recent as recent_notifications
+from danmu_intel.notify import suppression
+from danmu_intel.notify.suppression import list_alerts
 from danmu_intel.publish import release as release_module
 from danmu_intel.report import forms as report_forms
 from danmu_intel.report.llm import cost as llm_cost
@@ -723,6 +725,18 @@ def render_notifications(ctx: AdminContext, query: Mapping[str, str]) -> Html:
         for kind in _distinct(conn, "SELECT DISTINCT kind FROM notifications")
     ):
         kinds.add(kind, count)
+    alert_rows = html.Table(("告警", "最近发生", "次数", "状态", "最后送达", "恢复"))
+    for alert in list_alerts(conn, limit=limit):
+        alert_rows.add(
+            alert.kind,
+            html.stamp(alert.last_seen),
+            alert.count,
+            html.tag("告警中", "critical")
+            if alert.state == suppression.FIRING
+            else html.tag("已恢复", "ok"),
+            html.stamp(alert.last_sent_at),
+            html.stamp(alert.resolved_at),
+        )
     return html.layout(
         "通知与告警",
         html.raw(
@@ -732,12 +746,21 @@ def render_notifications(ctx: AdminContext, query: Mapping[str, str]) -> Html:
                     [
                         ("待投递", by_state.get("pending", 0)),
                         ("已送达", by_state.get("delivered", 0)),
+                        ("被冷却压住", by_state.get("suppressed", 0)),
                         ("过期销毁", by_state.get("dropped_expired", 0)),
+                        ("重试用尽", by_state.get("failed", 0)),
                     ]
                 ),
-                note="5 分钟时效闸门、冷却去重与投递（QQ Bot 主 / TG 备）属 T11；本页只看队列，不改投递状态。",
+                note="投递由 `danmu-intel notify` 负责（5 分钟闸门：超时销毁不补发）；本页只读队列"
+                "与告警台账，不改投递状态。",
             )
             + html.card("按类型", kinds.render(empty="队列是空的"))
+            + html.card(
+                "告警台账",
+                alert_rows.render(empty="还没有发生过任何告警"),
+                note="同一件事（同 kind + 同一场比赛/房间/供应商/订单）在冷却期内只发一次；"
+                "条件消失时发一条恢复通知（ADR-0019）。",
+            )
             + html.card("最近事件", rows.render(empty="还没有任何事件"))
         ),
         nav=nav_items(),
