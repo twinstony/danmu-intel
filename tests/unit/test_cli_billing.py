@@ -214,11 +214,11 @@ def test_chain_watch_orders_reports_grant_failures(conn, monkeypatch, capsys):
 
 
 def test_serve_command_starts_the_api(conn, monkeypatch, capsys):
-    from danmu_intel.billing import api
+    from danmu_intel import api
 
     seen: dict[str, object] = {}
     monkeypatch.setattr(api, "run", lambda conn, *, host, port: seen.update(host=host, port=port))
     assert main(["serve", "--host", "127.0.0.1", "--port", "9000"]) == 0
     out = capsys.readouterr().out
-    assert "收款 API 监听 127.0.0.1:9000" in out
+    assert "对外 API 监听 127.0.0.1:9000" in out
     assert seen == {"host": "127.0.0.1", "port": 9000}

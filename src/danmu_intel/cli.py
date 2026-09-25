@@ -968,11 +968,14 @@ def _cmd_grant(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    """起 HTTP 面：下单 / 领取 / 校验 / 付费正文（Funnel 转发到本进程）。"""
-    from danmu_intel.billing import api
+    """起 HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报（Funnel 转发到本进程）。"""
+    from danmu_intel import api
 
     conn = open_db()
-    print(f"收款 API 监听 {args.host}:{args.port}（接口：/api/orders、/api/claim、/api/verify、/api/report/…)")
+    print(
+        f"对外 API 监听 {args.host}:{args.port}（接口：/api/orders、/api/claim、/api/verify、"
+        "/api/report/…、/api/stats/beacon、/api/stats/daily）"
+    )
     try:
         api.run(conn, host=args.host, port=args.port)
     except KeyboardInterrupt:
@@ -1207,7 +1210,7 @@ def build_parser() -> argparse.ArgumentParser:
     grant_cmd.add_argument("--actor", default="管理员", help="操作者（进审计）")
     grant_cmd.set_defaults(func=_cmd_grant)
 
-    serve = sub.add_parser("serve", help="HTTP 面：下单 / 领取 / 校验 / 付费正文")
+    serve = sub.add_parser("serve", help="HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报")
     serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认只监听本机，公网靠 Funnel）")
     serve.add_argument("--port", type=int, default=8080)
     serve.set_defaults(func=_cmd_serve)
