@@ -341,6 +341,23 @@ def matches(order: Order, transfer: Transfer) -> bool:
     return order.address.lower() == transfer.address.lower()
 
 
+def candidates_for(conn: sqlite3.Connection, transfer: Transfer) -> list[Order]:
+    """按链上位置找出**可能**属于这笔入账的订单（polygon 按地址、solana 按 memo）。
+
+    资产是否一致、地址是否真的对上，交给 `matches` 判定 —— 查询只是候选筛选。
+    """
+    if transfer.network == SOLANA:
+        rows = conn.execute(
+            "SELECT * FROM orders WHERE network=? AND memo=?", (SOLANA, transfer.memo)
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM orders WHERE network=? AND lower(address)=lower(?)",
+            (POLYGON, transfer.address),
+        ).fetchall()
+    return [_to_order(row) for row in rows]
+
+
 def paid_total(conn: sqlite3.Connection, order_id: int) -> int:
     row = conn.execute(
         "SELECT COALESCE(SUM(units), 0) AS total FROM order_payments WHERE order_id=?",
