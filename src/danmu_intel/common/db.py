@@ -16,6 +16,9 @@ T9 加 `members` / `orders` / `order_payments` / `member_credentials` / `rate_li
 T10 加 `stats_events`（站点统计明细：只有每日盐下的访客哈希，**没有 IP / UA / 身份**）、
 `stats_daily`（日汇总：明细 90 天到期后唯一留存的口径）与 `stats_salt`（每日盐，只留当天一行）。
 
+T12 加 `config_version`（配置版本号，单行：每次保存配置递增一级 —— 采集子进程据此按新配置
+重起，NFR-T-4「配置改动 1 分钟内生效」的跨进程那一半）。
+
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
 """
@@ -120,6 +123,11 @@ CREATE TABLE IF NOT EXISTS llm_calls(        -- LLM 调用记账（成本硬闸�
 
 CREATE TABLE IF NOT EXISTS config(             -- 后台可视化配置（≤60s 生效）
   key TEXT PRIMARY KEY, value_json TEXT NOT NULL,
+  updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL);
+
+CREATE TABLE IF NOT EXISTS config_version(    -- 配置版本号（单行：每次保存递增，跨进程失效缓存的依据）
+  id INTEGER PRIMARY KEY CHECK(id=1), version INTEGER NOT NULL,
+  keys_json TEXT NOT NULL,      -- 本次改了哪几把键
   updated_at INTEGER NOT NULL, updated_by TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS chain_cursors(     -- 链上监听游标（补扫与断点续扫的依据）

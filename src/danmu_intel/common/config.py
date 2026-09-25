@@ -15,11 +15,10 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from dataclasses import dataclass, fields
 from typing import Any
 
-from danmu_intel.common import audit
+from danmu_intel.common import audit, config_store
 
 CONFIG_KEY = "stats"
 
@@ -93,17 +92,18 @@ class StatsConfig:
 
 
 def load_stats_config(conn: sqlite3.Connection) -> StatsConfig:
-    """读配置：默认值 + `config` 表里 `stats` 键的覆盖。"""
-    row = conn.execute("SELECT value_json FROM config WHERE key=?", (CONFIG_KEY,)).fetchone()
-    if row is None:
-        return StatsConfig()
-    return StatsConfig.from_dict(json.loads(row["value_json"]))
+    """读配置：默认值 + `config` 表里 `stats` 键的覆盖（走 60s TTL 缓存，NFR-T-4）。"""
+    return StatsConfig.from_dict(config_store.load(conn, CONFIG_KEY))
 
 
 def save_stats_config(
     conn: sqlite3.Connection, *, actor: str, changes: dict[str, Any], ts: int | None = None
 ) -> StatsConfig:
-    """改门槛并留审计（设计 §9.1 灰信号第 4 条）。返回生效后的配置。"""
+    """改门槛并留审计（设计 §9.1 灰信号第 4 条）。返回生效后的配置。
+
+    写入走 `config_store.save`：同一个动作里换掉 `config` 行并**递增配置版本号**，
+    本进程的缓存立刻失效（下一次读就是新值），别的进程最多 60 秒后跟上。
+    """
     current = load_stats_config(conn)
     updated = StatsConfig.from_dict({**current.as_dict(), **changes})
     audit.record(
@@ -114,16 +114,5 @@ def save_stats_config(
         detail={"before": current.as_dict(), "after": updated.as_dict()},
         ts=ts,
     )
-    conn.execute(
-        "INSERT INTO config(key, value_json, updated_at, updated_by) VALUES(?, ?, ?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, "
-        "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-        (
-            CONFIG_KEY,
-            updated.to_json(),
-            int(time.time() * 1000) if ts is None else ts,
-            actor,
-        ),
-    )
-    conn.commit()
+    config_store.save(conn, CONFIG_KEY, updated.as_dict(), actor=actor, ts=ts)
     return updated

@@ -142,6 +142,7 @@ def test_db_creates_all_tables(data_root):
             "audit_log",
             "chain_cursors",
             "config",
+            "config_version",
             "danmu_segments",
             "gray_signals",
             "llm_calls",
