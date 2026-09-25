@@ -274,13 +274,14 @@ CREATE TABLE stats_daily(       -- 汇总
 CREATE TABLE notifications(     -- 通知投递（5 分钟时效闸门）
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL,
   payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
-  state TEXT NOT NULL,          -- pending|delivered|dropped_expired|failed
+  state TEXT NOT NULL,          -- pending|delivered|suppressed|dropped_expired|failed
   delivered_at INTEGER, channel TEXT, attempts INTEGER NOT NULL DEFAULT 0);
 
-CREATE TABLE alerts(            -- 告警去重/抑制
-  id INTEGER PRIMARY KEY, alert_key TEXT NOT NULL, kind TEXT NOT NULL,
+CREATE TABLE alerts(            -- 告警去重/抑制（T11 落地，见 ADR-0019）
+  id INTEGER PRIMARY KEY, alert_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
   first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
-  count INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL); -- firing|resolved
+  count INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL,  -- firing|resolved
+  last_sent_at INTEGER, resolved_at INTEGER);
 
 CREATE TABLE audit_log(         -- 一切人工/自动写操作留痕
   id INTEGER PRIMARY KEY, ts INTEGER NOT NULL, actor TEXT NOT NULL,
@@ -651,6 +652,9 @@ class Adapter(Protocol):
 
 **5 分钟时效闸门（需求明示，覆盖所有类型）**：通知入库即 `created_at`；`notifier` 每 30s 扫描；超过 5 分钟未送达 → `state='dropped_expired'`（**销毁，不补发**）；尝试失败重试 2 次（间隔 30s）后同样销毁。
 **抑制与去重**：同 `alert_key` 在冷却期（默认 15 分钟）内只发一次；恢复时发送一次恢复通知。
+
+> 落地细节（被抑制的通知写 `state='suppressed'` 留痕、`alert_key` 由 kind + 身份字段拼出、
+> 冷却期从最后一次送达起算、通道降级与高危冗余、断网留痕到销毁）见 ADR-0019。
 
 ---
 

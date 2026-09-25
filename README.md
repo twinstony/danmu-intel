@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9+T10）
+## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9+T10+T11）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -75,7 +75,16 @@ Solana 单一收款地址 + **每单唯一 memo**；金额含唯一小额尾数�
 明细 90 天 → 先汇总入 `stats_daily` 再删；`GET /api/stats/daily` 只出计数，没有任何
 IP / 访客哈希 / 身份字段（AC-9）。
 
-不含通知投递、后台、归档（见设计 §19 实施分层；T9 的到期提醒与凭据重发走通讯渠道，属 T11）。
+**T11**：**通知与报警**（统一 5 分钟时效闸门，覆盖全类型）—— 十类事件（采集退出/静默/丢包/磁盘、
+发布失败、链上异常、开通失败、待补款、LLM 降级、会员批处理失败）一律走同一个出口
+（`notifications(state='pending')`）与**同一个投递循环**：`danmu-intel notify` 每 30 秒扫一遍，
+**超过 5 分钟未送达即 `dropped_expired`（销毁不补发）**，通道 QQ Bot（主）+ Telegram（备）——
+高危主备都发、其余主通道失败时备通道兜底；同一个 `alert_key` 在冷却期（15 分钟）内只发一次
+（后来的留痕 `suppressed` 不发），条件消失时发一条**恢复通知**；
+**断网/限速不静默**：每次失败写 `audit_log`（含通道错误与第几次尝试），重试 2 次用尽才销毁；
+一个通道都没配时 `notify` 直接非零退出，不假装送达。
+
+不含后台、归档（见设计 §19 实施分层）。
 
 ## 安装
 
@@ -143,6 +152,11 @@ danmu-intel chain-usage                                 # 额度：当日/当月
 danmu-intel verify-sources --match-id 1 --kind full  # 逐项复核来源（文件 + 行范围 + SHA256）
 danmu-intel rebuild        --match-id 1  # AC-13：删统计后重算，结果必须逐字节相同
 python3 tools/check_no_secrets.py        # AC-12：全库零命中可动用资产凭据
+
+# ⑪ 通知与报警（QQ Bot 主 + TG 备；凭据放仓库外 .env，见下文）
+danmu-intel notify                       # 投递一轮（超过 5 分钟未送达的销毁不补发）
+danmu-intel notify --loop                # 常驻 notifier（systemd 拉起的那个）
+danmu-intel alerts                       # 告警台账：同一 alert_key 发生几次、恢复了没
 ```
 
 ### 报告三形态怎么看（T5）
@@ -350,6 +364,47 @@ danmu-intel site-stats --prune                # 90 天保留：到期明细先�
 0 4 * * * danmu-intel site-stats --prune      # cron：90 天以外先汇总再删（不跑也不会算错）
 ```
 
+### 通知与报警怎么看（T11）
+
+凭据只放仓库外 `.env`（0600，永不入 git）：
+
+```bash
+# ~/danmu-intel-data/.env（chmod 600）
+# 主通道：QQ 官方 Bot（单聊给 QQ_BOT_OPENID，群给 QQ_BOT_GROUP_OPENID）
+QQ_BOT_APP_ID=…
+QQ_BOT_APP_SECRET=…
+QQ_BOT_OPENID=…
+# 备通道：Telegram
+TG_BOT_TOKEN=…
+TG_CHAT_ID=…
+```
+
+```bash
+danmu-intel notify                # 投递一轮（cron 友好）；没配通道直接非零退出，不假装送达
+danmu-intel notify --loop         # 常驻 notifier：每 30 秒扫一遍（systemd 拉起的那个）
+danmu-intel alerts                # 告警台账：同一 alert_key 发生几次、最后何时发的、恢复了没
+danmu-intel events --match-id 1   # 原始事件流（含已送达/被抑制/被销毁的所有状态）
+danmu-intel notify-config --set cooldown_ms=600000   # 门槛（闸门/冷却期/扫描间隔/尝试次数）
+```
+
+闸门与抑制的规矩（用户明示「覆盖所有类型」）：
+
+| 规矩 | 落地 |
+|---|---|
+| 5 分钟内送达 | 每 30 秒扫一遍；入库即 `created_at`，投递时刻记 `delivered_at` + 通道名 |
+| 超过 5 分钟 → 销毁不补发 | `state='dropped_expired'`，连尝试都不尝试（`notify.dropped_expired` 留审计） |
+| 同 `alert_key` 冷却期内只发一次 | `alerts` 台账；后来者 `state='suppressed'`（**留痕不发**），次数照计 |
+| 恢复时发一次恢复通知 | `<kind>.resolved`（`info`）；供应商又通了、额度回落都接线了 |
+| 断网/限速不静默 | 每次失败写 `audit_log`（`notify.delivery_failed`）；首次 + 重试 2 次用尽 → `failed` |
+| 高危冗余 | `critical` 主备都发；其余只发主通道，主通道全挂才用备通道兜底 |
+
+十类事件（设计 §15）与各自的出口：采集异常四类（`collect/incidents.py`：进程退出/重启超限、
+静默/无首条、落盘丢包 >2%、磁盘 <5GB）、发布失败（`publish/release.py`）、
+链上异常两类（`chain/alerts.py`：限速/拉取失败、额度越线）、付款相关两类
+（`billing/settle.py`：开通失败、待补款）、解读层两类（`report/llm/alerts.py`：成本超闸、降级）、
+会员批处理失败（`billing/members.py`）。验收在 `tests/e2e/test_notify_delivery.py`：
+十类事件全部在闸门内送达、超时销毁不补发、冷却期只发一次、断网留痕到销毁。
+
 ### 统计门槛怎么调（T4）
 
 门槛（灰信号 N/M/K、终局信号阈值、边界复核门槛）都在 `config` 表，改动留审计：
@@ -368,7 +423,7 @@ danmu-intel config --set gray_min_users=5 --actor 管理员     # 改门槛（�
 ```bash
 danmu-intel health       --match-id 1   # 每房间：状态/PID/最后一条消息/重连/重启/严重级别/最近异常
 danmu-intel contribution --match-id 1   # 每房间贡献量：条数 / 时间跨度 / 去重后条数（AC-15）
-danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通道投递）
+danmu-intel events       --match-id 1   # 事件流（pending/delivered/suppressed/dropped_expired/failed）
 ```
 
 - 一房间一子进程；主进程只调度（不碰网络），5 秒轮询一次。
@@ -376,7 +431,8 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 - 进程退出/僵死 → 退避 1s→2s→…→60s 重拉；**同一房间 30 分钟内重启超过 5 次**则停止重试
   并以非零退出码结束，停止原因写进事件库（`danmu-intel events` 可查）。
 - 断流 60 秒触发重连（累计 `reconnects`）；120 秒没有首条消息判 `no_stream`（不退出，
-  房间可能只是还没开播）；数据盘可用 < 5GB 产生 `disk_low`（不静默）。
+  房间可能只是还没开播）；数据盘可用 < 5GB 产生 `disk_low`（不静默）；
+  落盘丢包率 > 2% 产生 `drop_rate_high`（收到但没完整写进 JSONL 的条数 ÷ 收到的条数）。
 - **AC-15 的 30 分钟真实验收**：上面 `supervise` 那条命令跑满 `--seconds 1800`（建议选
   三个确实在解说同一场比赛的直播间），然后用 `health`/`contribution` 逐房间核对条数、
   时间跨度与去重后条数——三房间互不为子集，合计不等于任一房间的条数。
@@ -402,13 +458,14 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 | SQLite | `~/danmu-intel-data/db.sqlite3`（WAL） | 否 |
 | 心跳文件 | `~/danmu-intel-data/runtime/heartbeat/<platform>-<room_id>.json` | 否 |
 | 用户哈希盐值 | `~/danmu-intel-data/salt`（0600） | 否 |
-| **凭据**（`DEEPSEEK_API_KEY` 等） | `~/danmu-intel-data/.env`（**0600，权限不对就拒读**） | 否 |
+| **凭据**（`DEEPSEEK_API_KEY` / `POLYGONSCAN_API_KEY` / `HELIUS_API_KEY` / `VERCEL_TOKEN` / `QQ_BOT_*` / `TG_*` 等） | `~/danmu-intel-data/.env`（**0600，权限不对就拒读**） | 否 |
 | LLM 调用账本 | `db.sqlite3` 的 `llm_calls` 表（成本硬闸的数据源） | 否 |
 | 链上监听游标 | `db.sqlite3` 的 `chain_cursors` 表（一地址一行：扫到哪了） | 否 |
 | 订单与逐笔入账 | `db.sqlite3` 的 `orders` / `order_payments` 表（账本：谁、多少钱、哪笔交易） | 否 |
 | 会员与凭据哈希 | `db.sqlite3` 的 `members` / `member_credentials` 表（**凭据只存 sha256**） | 否 |
 | 档位价格与收款配置 | `db.sqlite3` 的 `config` 表的 `billing` 键（xpub / Solana 地址 / 价格 / 宽限期） | 否 |
 | 供应商额度账本 | `db.sqlite3` 的 `quota_usage` 表（按供应商按日累加；报警阈值的唯一数据源） | 否 |
+| 通知队列与告警台账 | `db.sqlite3` 的 `notifications` / `alerts` 表（待投递/已送达/被抑制/被销毁的每一条） | 否 |
 | 提示词模板 | `prompts/interpretation/<版本>/` | 是 |
 | 站点产物 | `site/**`（整棵站点树 + `release.json`；暂存目录 `site/.staging/` 不进 git） | 是 |
 
@@ -472,6 +529,12 @@ xpub → 地址链、EIP-55 向量，`tests/unit/test_billing_xpub.py`；xprv �
 `tests/unit/test_chain_watcher.py` 验轮询/补扫/告警去重，端到端在 `tests/e2e/test_chain_watch.py`
 （一轮轮询看见入账 → 限速那轮不静默且游标不动 → 恢复后补扫找回那一笔 → 账本逐次可对）。
 全程不连外网，也没有任何真实密钥（测试里的 key 是拼接出来的假串，扫面工具自己也要能扫过）。
+
+通知投递的测试缝是**注入的假通道 + 显式时间戳**（`tests/conftest.py` 的 `FakeChannel`）：
+`tests/unit/test_notify_{channels,suppression,notifier,render}.py` 分别断言请求形状与降级策略、
+冷却期与恢复、闸门边界与重试到销毁、文本渲染；`tests/unit/test_cli_notify.py` 跑三条 CLI；
+验收在 `tests/e2e/test_notify_delivery.py`（十类事件 5 分钟内全部送达、超时销毁不补发、
+冷却期只发一次、断网每次失败都留痕直到销毁）。全程没有任何真凭据，也不发一个真请求。
 
 ## 边界
 
