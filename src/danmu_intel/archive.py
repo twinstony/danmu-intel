@@ -292,6 +292,10 @@ def run(
                 archived.append(_archive_one(conn, segment, data_root=root_path, moment=moment))
             except ArchiveRefused as exc:
                 anomalies.append(Anomaly(exc.rel_path, exc.reason))
+            except OSError as exc:
+                # 单件写失败（NAS 满 / 只读 / 权限）不打断整批：在线件与索引都没动，
+                # 把这一件记成异常继续跑，最后非零退出让 cron 喊人
+                anomalies.append(Anomaly(segment.rel_path, f"归档失败（{type(exc).__name__}）：{exc}"))
 
     result = ArchiveRun(
         cutoff=cutoff,

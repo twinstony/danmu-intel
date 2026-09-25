@@ -208,6 +208,22 @@ def _bad_artifact(source: Path, target: Path) -> int:
     return target.stat().st_size
 
 
+def test_run_keeps_going_when_the_archive_write_fails(conn, data_root, monkeypatch):
+    """单件写失败（NAS 满/只读）不打断整批：记成异常继续，最后非零退出。"""
+    index_file(conn, data_root, OLD)
+    index_file(conn, data_root, "raw/huya/2026-03-02/660000-17.jsonl", room_id="660001")
+
+    def boom(source, target, **kw):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(evidence, "compress_file", boom)
+    result = archive.run(conn, actor="归档器", cutoff=CUTOFF, data_root=data_root, allow_same_disk=True)
+
+    assert result.archived == () and len(result.anomalies) == 2
+    assert "归档失败（OSError）" in result.anomalies[0].reason
+    assert (data_root / OLD).exists()  # 在线件与索引都没动
+
+
 def test_run_requires_an_independent_mount(conn, data_root):
     """「迁 NAS」的机器可查判据：归档根要么是独立挂载点，要么不存在（没挂上）。"""
     index_file(conn, data_root, OLD)
