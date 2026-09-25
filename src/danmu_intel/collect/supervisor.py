@@ -11,6 +11,9 @@
   1 分钟内生效」在子进程侧的那一半（轮询周期 5 秒 ≪ 60 秒）。配置改动对子进程的影响
   映射会随配置项而变，因此不去猜「哪把键影响哪个房间」，宁可多起一次（落盘与会话接着来），
   也不让旧配置继续跑；配置重起**不计入重启上限**（它不是故障，是人改的配置）；
+- **数据源登记表变了 → 增/停对应的子进程**（`registry`）：后台在页面上登记或删掉一个
+  直播间，改动同样递增版本号，于是这里读到新版本时顺手对齐房间集合
+  （FR-C8-1/C8-2、需求 §3.4「添加直播间 → 一分钟内生效，无需重启服务」）；
 - 子进程死了以后，它这一小时里已落盘但还没封存的文件由主进程补封（`seal_pending_files`），
   证据不许因为进程被杀而漏掉。
 
@@ -76,6 +79,7 @@ class ChildProcess(Protocol):
 
 Spawner = Callable[[list[str], dict[str, str]], ChildProcess]
 BeatReader = Callable[[RoomKey], Heartbeat | None]
+RoomRegistry = Callable[[], list[RoomKey]]
 
 
 @dataclass
@@ -179,6 +183,7 @@ class Supervisor:
         spawn: Spawner | None = None,
         read_beat: BeatReader | None = None,
         poll_interval: float | None = None,
+        registry: RoomRegistry | None = None,
     ) -> None:
         self.conn = conn
         self.match_id = match_id
@@ -192,6 +197,8 @@ class Supervisor:
             lambda room: read_heartbeat(room.platform, room.room_id, data_root=self.data_root)
         )
         self.config_version = config_store.version(conn)
+        #: 数据源登记表的读取器（`None` = 房间集合由命令行给定，不随库变化）
+        self.registry = registry
         self.runs: list[RoomRun] = [RoomRun(room=room, match_id=match_id) for room in rooms]
 
     # —— 对外 ——
@@ -278,7 +285,7 @@ class Supervisor:
         )
 
     def _reload_config(self, now: int) -> None:
-        """配置版本号变了 → 让子进程按新配置重起（NFR-T-4 的跨进程那一半）。
+        """配置版本号变了 → 对齐数据源 + 让子进程按新配置重起（NFR-T-4 的跨进程那一半）。
 
         纯轮询判定，不靠信号也不靠内存里的时间戳：库里的版本号是唯一真相源，
         因此监督进程重启后再接着跑也不会错过一次配置变更。
@@ -287,10 +294,39 @@ class Supervisor:
         if current == self.config_version:
             return
         self.config_version = current
+        self._sync_registry(now)
         for run in self.runs:
-            if run.process is None:
+            if run.process is None or run.stopped:
                 continue
             self._restart_for_config(now, run, version=current)
+
+    def _sync_registry(self, now: int) -> None:
+        """按登记表对齐房间集合：多出来的房间停掉，新登记的房间立刻排上。"""
+        if self.registry is None:
+            return
+        wanted = {(room.platform, room.room_id): room for room in self.registry()}
+        known = {(run.room.platform, run.room.room_id) for run in self.runs}
+        for run in self.runs:
+            if (run.room.platform, run.room.room_id) in wanted or run.stopped:
+                continue
+            self._drop_room(run)
+        for key, room in wanted.items():
+            if key in known:
+                continue
+            logger.info("【%s/%s】数据源新增，纳入监督", room.platform, room.room_id)
+            self.runs.append(RoomRun(room=room, match_id=self.match_id, next_attempt_at=now))
+
+    def _drop_room(self, run: RoomRun) -> None:
+        """一个房间从数据源里被删掉了：停掉它的子进程，并记下原因（不是重启超限）。"""
+        if run.process is not None:
+            returncode = self._terminate(run)
+            self._close_session(run, returncode=returncode, reason="room_removed", severity="info",
+                                emit_exit=False)
+            run.process = None
+        run.stopped = True
+        run.state = "removed"
+        run.reason = "已从数据源登记表里删除（后台删掉了这个直播间）"
+        logger.info("【%s/%s】%s", run.room.platform, run.room.room_id, run.reason)
 
     def _restart_for_config(self, now: int, run: RoomRun, *, version: int) -> None:
         """按新配置重起一个房间的子进程：立刻（不退避）且不动重启上限。

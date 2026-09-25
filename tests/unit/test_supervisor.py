@@ -524,3 +524,46 @@ def test_config_version_is_reread_from_the_db(conn, data_root):
     assert restarted.supervisor.config_version == 1
     restarted.tick()
     assert restarted.supervisor.runs[0].config_restarts == 0, "版本号已在启动时对齐，不必白重起"
+
+
+# —— 数据源登记表 → 增/停子进程（FR-C8-2：1 分钟内生效）——
+
+
+def test_registry_adds_and_removes_rooms_on_version_change(conn, data_root):
+    """后台登记/删除直播间 → 版本号变 → 监督进程对齐房间集合并拉/停子进程。"""
+    from danmu_intel.common import rooms as rooms_module
+
+    def read_registry() -> list[RoomKey]:
+        return [
+            RoomKey(room.platform, room.room_id, room.url)
+            for room in rooms_module.list_rooms(conn)
+        ]
+
+    harness = Harness(conn, [ROOM], data_root=data_root)
+    harness.supervisor.registry = read_registry
+    harness.tick()
+    assert len(harness.supervisor.runs) == 1
+
+    # 后台登记第二个直播间：版本号一变，新房间立刻纳入监督
+    rooms_module.add_room(conn, platform="huya", room_id="323444", url=OTHER_ROOM.url, actor="admin")
+    harness.tick()
+    assert [run.room.room_id for run in harness.supervisor.runs] == ["660000", "323444"]
+    assert harness.supervisor.runs[1].process is not None, "新房间要真的被拉起来"
+
+    # 后台删掉第一个：它的子进程被停掉，并记下原因（不是重启超限）
+    first = rooms_module.list_rooms(conn)[0]
+    rooms_module.delete_room(conn, first.id, actor="admin")
+    harness.tick()
+    removed = harness.supervisor.runs[0]
+    assert removed.stopped is True and removed.state == "removed"
+    assert "登记表" in (removed.reason or "")
+    assert harness.processes[0].terminated is True
+    assert removed.config_restarts == 0, "被删除的房间不该再按配置重起一遍"
+
+
+def test_registry_is_ignored_when_not_configured(conn, data_root):
+    harness = Harness(conn, data_root=data_root)
+    harness.tick()
+    save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 8})
+    harness.tick()
+    assert [run.room.room_id for run in harness.supervisor.runs] == ["660000"]

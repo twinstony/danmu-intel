@@ -23,7 +23,7 @@ import sqlite3
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 #: 配置缓存的有效期：NFR-T-4「配置改动 1 分钟内生效」的那个 1 分钟。
 CACHE_TTL_MS = 60_000
@@ -123,16 +123,34 @@ def save(
         "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
         (key, payload_json, moment, actor),
     )
+    changelog = _bump(conn, keys=(key,), actor=actor, moment=moment)
+    path = _db_path(conn)
+    if path is not None:
+        # 保存方**立刻**失效自己那份缓存：后台改完的下一屏就必须是新值（不等 TTL）。
+        _CACHE[(path, key)] = (CLOCK() * 1000, dict(value))
+    return changelog
+
+
+def bump(conn: sqlite3.Connection, *, keys: Sequence[str], actor: str, ts: int | None = None) -> Version:
+    """只递增版本号，不写 `config` 行：**存在别的表里、但同样要跨进程生效**的改动走它。
+
+    今天只有数据源（`rooms` 表）：后台在页面上加/删一个直播间，采集监督进程要在 1 分钟内
+    增/停对应的子进程（FR-C8-1/C8-2、需求 §3.4）。版本号是这条链路的唯一触发信号，
+    因此数据源改动必须落在同一个计数器上。
+    """
+    if not actor:
+        raise ValueError("改配置必须写明 actor（谁改的）")
+    moment = int(time.time() * 1000) if ts is None else ts
+    return _bump(conn, keys=tuple(keys), actor=actor, moment=moment)
+
+
+def _bump(conn: sqlite3.Connection, *, keys: Sequence[str], actor: str, moment: int) -> Version:
     conn.execute(
         "INSERT INTO config_version(id, version, keys_json, updated_at, updated_by) "
         "VALUES(1, 1, ?, ?, ?) "
         "ON CONFLICT(id) DO UPDATE SET version=config_version.version+1, "
         "keys_json=excluded.keys_json, updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-        (json.dumps([key]), moment, actor),
+        (json.dumps(list(keys)), moment, actor),
     )
     conn.commit()
-    path = _db_path(conn)
-    if path is not None:
-        # 保存方**立刻**失效自己那份缓存：后台改完的下一屏就必须是新值（不等 TTL）。
-        _CACHE[(path, key)] = (CLOCK() * 1000, dict(value))
-    return Version(version=version(conn), keys=(key,), updated_at=moment, updated_by=actor)
+    return Version(version=version(conn), keys=tuple(keys), updated_at=moment, updated_by=actor)

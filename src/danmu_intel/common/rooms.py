@@ -13,7 +13,7 @@ from __future__ import annotations
 import sqlite3
 from dataclasses import dataclass
 
-from danmu_intel.common import audit
+from danmu_intel.common import audit, config_store
 
 DISCOVERED_BY_MANUAL = "manual"
 DISCOVERED_BY_SCHEDULE = "schedule"
@@ -106,6 +106,7 @@ def add_room(
         )
     conn.commit()
     room = _named(conn, platform=platform, room_id=room_id)
+    config_store.bump(conn, keys=("rooms",), actor=actor, ts=ts)  # 数据源改动 = 版本号++（1 分钟内生效）
     audit.record(
         conn,
         actor=actor,
@@ -136,6 +137,7 @@ def update_room(
     )
     conn.commit()
     after = get_room(conn, room_row_id)
+    config_store.bump(conn, keys=("rooms",), actor=actor, ts=ts)
     audit.record(
         conn,
         actor=actor,
@@ -163,5 +165,6 @@ def delete_room(
         )
     conn.execute("DELETE FROM rooms WHERE id=?", (room_row_id,))
     conn.commit()
+    config_store.bump(conn, keys=("rooms",), actor=actor, ts=ts)
     audit.record(conn, actor=actor, action=ACTION_DELETE, target=room.label, detail={}, ts=ts)
     return room

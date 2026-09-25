@@ -464,3 +464,49 @@ def test_chain_watch_reports_failures_with_nonzero_exit(conn, monkeypatch, capsy
     captured = capsys.readouterr()
     assert "扫描失败｜polygon/0xabc：限速：HTTP 429" in captured.err
     assert "本轮共看见 0 笔入账（扫描失败 1 个目标）" in captured.out
+
+
+def test_supervise_needs_rooms_or_registry(data_root, capsys):
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    assert main(["supervise", "--match-id", "1"]) == 2
+    assert "--from-registry" in capsys.readouterr().err
+
+
+def test_supervise_rejects_an_empty_registry(data_root, capsys):
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    capsys.readouterr()
+    assert main(["supervise", "--match-id", "1", "--from-registry"]) == 2
+    assert "登记表里还没有任何直播间" in capsys.readouterr().err
+
+
+def test_supervise_reads_rooms_from_the_registry(data_root, capsys, monkeypatch):
+    """`--from-registry`：房间集合来自后台登记的那张表（一房间一子进程）。"""
+    from danmu_intel.common import db as db_module
+    from danmu_intel.common import rooms as rooms_module
+    from tests.unit.test_supervisor import FakeProcess
+
+    monkeypatch.setattr("danmu_intel.collect.supervisor.POLL_INTERVAL_S", 0.01)
+    monkeypatch.setattr(
+        "danmu_intel.collect.supervisor.popen",
+        lambda command, env: FakeProcess(pid=4242 + len(command)),
+    )
+    main(["match", "add", "--league", "LPL", "--team-a", "iG", "--team-b", "LNG"])
+    conn = db_module.open_db()
+    try:
+        rooms_module.add_room(
+            conn, platform="huya", room_id="660000", url="https://www.huya.com/660000", actor="admin"
+        )
+        rooms_module.add_room(
+            conn, platform="soop", room_id="afchall", url="https://play.sooplive.com/afchall", actor="admin"
+        )
+    finally:
+        conn.close()
+    capsys.readouterr()
+
+    code = main(["supervise", "--match-id", "1", "--from-registry", "--seconds", "0.05"])
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert "开始监督 2 个直播间" in out
+    assert "huya/660000" in out and "soop/afchall" in out

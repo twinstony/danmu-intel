@@ -151,7 +151,12 @@ def test_dashboard_shows_counts_health_and_todos(conn, ctx, data_root):
     assert "采集健康" in rendered
     assert "huya/660000" in rendered and "主播甲" in rendered
     assert "待投递事件" in rendered
-    assert "配置版本：v1" in rendered, "seed 里改过收款配置，版本号就该是 1"
+    # 页面上显示的版本号必须就是库里的那个：seed 改过收款配置、也登记过房间 → 早已超过 1 版
+    from danmu_intel.common import config_store
+
+    shown = config_store.version(conn)
+    assert shown >= 2, "改配置与登记房间都要递增版本号"
+    assert f"配置版本：v{shown}" in rendered
     assert "线上发布：v1" in rendered
 
 

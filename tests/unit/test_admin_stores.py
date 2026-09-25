@@ -203,3 +203,20 @@ def test_delete_match_without_data_is_audited(conn):
         get_match(conn, match_id)
     entry = audit.entries(conn, action="match.delete")[-1]
     assert entry.detail["league"] == "LPL" and entry.target == str(match_id)
+
+
+def test_room_changes_bump_the_config_version(conn):
+    """数据源改动落在同一个版本号上：监督进程据此在 1 分钟内增/停子进程（FR-C8-2）。"""
+    from danmu_intel.common import config_store
+
+    before = config_store.version(conn)
+    room = rooms.add_room(conn, platform="huya", room_id="660000", url="https://a", actor="admin")
+    assert config_store.version(conn) == before + 1
+
+    rooms.update_room(conn, room.id, url="https://b", actor="admin")
+    assert config_store.version(conn) == before + 2
+
+    rooms.delete_room(conn, room.id, actor="admin")
+    assert config_store.version(conn) == before + 3
+    latest = config_store.latest(conn)
+    assert latest is not None and latest.keys == ("rooms",) and latest.updated_by == "admin"

@@ -2,6 +2,7 @@
 
     danmu-intel collect --url https://www.huya.com/660000 --seconds 300 --match-id 1
     danmu-intel supervise --match-id 1 --room … --room … --room …   # 多房间并发 + 监督
+    danmu-intel supervise --match-id 1 --from-registry    # 房间集合取后台登记表（增删 1 分钟生效）
     danmu-intel health --match-id 1            # 每房间健康状态（心跳/重连/重启/严重级别）
     danmu-intel contribution --match-id 1      # 每房间贡献量（条数/跨度/去重后条数）
     danmu-intel events --match-id 1            # 采集异常事件（待 T11 投递）
@@ -138,23 +139,50 @@ def _cmd_collect(args: argparse.Namespace) -> int:
 
 
 def _cmd_supervise(args: argparse.Namespace) -> int:
-    """多房间并发采集：一房间一子进程，退出/僵死自动拉起，超限停下来报事。"""
-    from danmu_intel.collect import get_adapter
-    from danmu_intel.collect.supervisor import Supervisor
+    """多房间并发采集：一房间一子进程，退出/僵死自动拉起，超限停下来报事。
 
-    adapter = get_adapter(args.platform)
-    rooms = [adapter.parse_room(url) for url in args.room]
-    seen: set[tuple[str, str]] = set()
-    for room in rooms:
-        key = (room.platform, room.room_id)
-        if key in seen:
-            raise ValueError(f"重复的直播间：{room.platform}/{room.room_id}（--room 不能重复）")
-        seen.add(key)
+    `--from-registry` 时房间集合来自库里的登记表（后台「房间与数据源」页登记的），
+    并在监督过程中按版本号增/停子进程 —— 于是后台改动 1 分钟内对采集生效（FR-C8-2）。
+    """
+    from danmu_intel.collect import get_adapter
+    from danmu_intel.collect.adapter import RoomKey
+    from danmu_intel.collect.supervisor import Supervisor
+    from danmu_intel.common import rooms as rooms_module
 
     conn = open_db()
     try:
         get_match(conn, args.match_id)
-        supervisor = Supervisor(conn, rooms, match_id=args.match_id, data_root=paths.data_dir())
+        adapter = get_adapter(args.platform)
+        registry = None
+        if getattr(args, "from_registry", False):
+
+            def registry() -> list[RoomKey]:
+                """每次读一遍登记表：后台增/删的直播间都要看得见（FR-C8-2）。"""
+                return [
+                    RoomKey(room.platform, room.room_id, room.url)
+                    for room in rooms_module.list_rooms(conn)
+                ]
+
+            rooms = registry()
+            if not rooms:
+                raise ValueError(
+                    "登记表里还没有任何直播间：先跑 danmu-intel supervise --room …，"
+                    "或在后台「房间与数据源」页登记"
+                )
+        else:
+            rooms = [adapter.parse_room(url) for url in args.room or []]
+            if not rooms:
+                raise ValueError("至少要给一个 --room，或用 --from-registry 从登记表读房间")
+        seen: set[tuple[str, str]] = set()
+        for room in rooms:
+            key = (room.platform, room.room_id)
+            if key in seen:
+                raise ValueError(f"重复的直播间：{room.platform}/{room.room_id}（--room 不能重复）")
+            seen.add(key)
+
+        supervisor = Supervisor(
+            conn, rooms, match_id=args.match_id, data_root=paths.data_dir(), registry=registry
+        )
         print(f"开始监督 {len(rooms)} 个直播间（比赛 #{args.match_id}）：" + "、".join(f"{r.platform}/{r.room_id}" for r in rooms))
         try:
             supervisor.run(seconds=args.seconds)
@@ -1130,7 +1158,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect.set_defaults(func=_cmd_collect)
 
     supervise = sub.add_parser("supervise", help="多房间并发采集与监督（一房间一子进程）")
-    supervise.add_argument("--room", action="append", required=True, metavar="URL", help="直播间链接，可重复")
+    supervise.add_argument("--room", action="append", default=None, metavar="URL", help="直播间链接，可重复")
+    supervise.add_argument(
+        "--from-registry", action="store_true",
+        help="房间集合从登记表读（后台登记/删除的房间 1 分钟内生效，FR-C8-2）",
+    )
     supervise.add_argument("--platform", default="huya", help="平台标识（默认 huya）")
     supervise.add_argument("--match-id", type=int, required=True)
     supervise.add_argument("--seconds", type=float, default=None, help="监督时长（秒），缺省则跑到所有房间停下")
