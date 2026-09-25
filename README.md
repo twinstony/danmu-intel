@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9）
+## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9+T10）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -67,8 +67,15 @@ Solana 单一收款地址 + **每单唯一 memo**；金额含唯一小额尾数�
 **零资金风险面**：系统只有 xpub、派生地址、memo 与收款地址，**没有任何签名能力**；
 `tools/check_no_secrets.py` 新增「扩展私钥」模式，xprv 一出现就拦。
 
-不含通知投递、后台、站点统计、归档（见设计 §19 实施分层；T9 的到期提醒与凭据重发走通讯渠道，
-属 T11）。
+**T10**：**站点统计自建**（不引第三方、不跨站跟踪）—— 站点产物里的每一页带一个内联 beacon
+（**配了 `api_base` 才写脚本**，否则静态站保持零脚本），打到自己的
+`POST /api/stats/beacon`；独立访客口径是 `sha256(每日盐 + IP + UA)`，**每日换盐**（只留当天
+一行，旧盐即时丢弃），因此答得了「某天多少人来过付费页」、答不了「这两天是不是同一个人」；
+付费页与否由**比赛状态机**在访问那一刻定死（比赛中途结束也不会把昨天的付费页访问改写成公开页）。
+明细 90 天 → 先汇总入 `stats_daily` 再删；`GET /api/stats/daily` 只出计数，没有任何
+IP / 访客哈希 / 身份字段（AC-9）。
+
+不含通知投递、后台、归档（见设计 §19 实施分层；T9 的到期提醒与凭据重发走通讯渠道，属 T11）。
 
 ## 安装
 
@@ -286,7 +293,7 @@ danmu-intel grant --order-ref DM1A2B3C4D --tx-ref 0x… --reason "用户提供�
 danmu-intel serve --host 127.0.0.1 --port 8080
 ```
 
-四个接口：
+对外接口（站点统计的两条见 T10 一节）：
 
 | 接口 | 作用 |
 |---|---|
@@ -294,6 +301,8 @@ danmu-intel serve --host 127.0.0.1 --port 8080
 | `POST /api/claim` | 领取凭据：账号 + 订单引用 + 领取令牌 → `Set-Cookie`（HttpOnly + Secure + SameSite=Lax） |
 | `POST /api/verify` | 校验凭据 → 会员状态与有效期（有效期对用户可见） |
 | `GET /api/report/<比赛>/<形态>/paid` | 凭据读取**付费正文**（比赛结束后自动转公开，无需凭据） |
+| `POST /api/stats/beacon` | 站点统计上报：`{page}` → 落一条明细（204 无内容；限流 120 次/分钟/IP） |
+| `GET /api/stats/daily?day=` | 某天的站点统计计数（不传 `day` 即今天；只有计数，没有身份字段） |
 
 纪律三条：**失败一律同一份响应**（含被限流，逐字节相同，AC-10）；**凭据只存哈希**、明文只在领取
 那一刻出现一次；**领取必须同时持有领取令牌**（只在下单的那个浏览器里，链上 memo 用的是公开引用，
@@ -304,6 +313,41 @@ danmu-intel serve --host 127.0.0.1 --port 8080
 ```bash
 */10 * * * * danmu-intel members --sweep      # active → grace → expired（每次转换写审计）
 * * * * *   danmu-intel chain-watch --orders --once
+```
+
+### 站点统计怎么看（T10）
+
+站点产物里的每一页都带一个自建 beacon（**配了 `api_base` 才写**，否则静态站零脚本）：
+`navigator.sendBeacon('<api_base>/api/stats/beacon', {page})`。数据全在自己库里的三张表：
+
+| 表 | 装什么 |
+|---|---|
+| `stats_events` | 明细：本地日、时刻、页面、`sha256(每日盐 + IP + UA)`、访问时是否付费页、凭据通过时的 `member_id` |
+| `stats_daily` | 日汇总：访问次数 / 会话数 / 独立访客 / 付费页次数 / 付费页人数（明细到期后唯一留存） |
+| `stats_salt` | 每日盐：**只留当天一行**，换日即丢旧盐（跨日不可还原同一人） |
+
+```bash
+danmu-intel site-stats --day 2026-09-22      # 那天的口径：访问量 / 会话 / 付费页人数 / 留资 / 下单转化
+danmu-intel site-stats                        # 缺省今天
+danmu-intel site-stats --prune                # 90 天保留：到期明细先汇总入 stats_daily 再删（cron 友好）
+```
+
+可回答 / 不可回答（AC-9）：
+
+| 能问 | 数字 |
+|---|---|
+| 某天访问量 | `page_views` / `sessions` / `unique_visitors` |
+| 某天多少人来过付费页 | `paid_unique_visitors`（另给 `paid_page_views` 次数） |
+| 下单转化 / 付费转化 | `orders` / `paid_orders` ÷ 当日付费页人数（分母为 0 时显示「—」，不编数字） |
+| 留资数 | `leads`（来自 `members` 账本） |
+| **不能问** | 「具体是谁」—— 统计里没有 IP / UA / 联系方式，只有当日盐下的哈希；<br>除非那人**自己留资或付费**，那时答案在会员/订单账本里（AC-9 的「除非」） |
+
+口径与取舍（每日盐、付费页分类为什么在访问那一刻冻结、为什么 `leads` 不落汇总表、
+`member_id` 为什么只认凭据不认自称、跨站下 `SameSite=Lax` cookie 带不上的后果）见
+[ADR-0018](docs/adr/0018-site-stats.md)。
+
+```bash
+0 4 * * * danmu-intel site-stats --prune      # cron：90 天以外先汇总再删（不跑也不会算错）
 ```
 
 ### 统计门槛怎么调（T4）

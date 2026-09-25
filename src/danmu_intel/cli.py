@@ -32,8 +32,10 @@
     danmu-intel orders                                  # 订单列表（状态/金额/差额/到期）
     danmu-intel members                                 # 会员列表；--sweep 执行到期降级
     danmu-intel grant --order-ref DM… --tx-ref 0x… --reason "…"   # 人工补开通（AC-5）
-    danmu-intel serve                                   # HTTP 面：下单 / 领取 / 校验 / 付费正文
+    danmu-intel serve                                   # HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报
     danmu-intel chain-watch --orders                    # 从待付订单派生监听目标并对账开通（AC-3）
+    danmu-intel site-stats --day 2026-09-22             # 那天多少人来过付费页（AC-9：答不了是谁）
+    danmu-intel site-stats --prune                      # 站点统计：90 天明细先汇总入 stats_daily 再删
 
 `chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
 一次调用记一次 `quota_usage`，用量 >80% 或撞限速都会写一条待投递报警（投递属 T11）。
@@ -968,17 +970,54 @@ def _cmd_grant(args: argparse.Namespace) -> int:
 
 
 def _cmd_serve(args: argparse.Namespace) -> int:
-    """起 HTTP 面：下单 / 领取 / 校验 / 付费正文（Funnel 转发到本进程）。"""
-    from danmu_intel.billing import api
+    """起 HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报（Funnel 转发到本进程）。"""
+    from danmu_intel import api
 
     conn = open_db()
-    print(f"收款 API 监听 {args.host}:{args.port}（接口：/api/orders、/api/claim、/api/verify、/api/report/…)")
+    print(
+        f"对外 API 监听 {args.host}:{args.port}（接口：/api/orders、/api/claim、/api/verify、"
+        "/api/report/…、/api/stats/beacon、/api/stats/daily）"
+    )
     try:
         api.run(conn, host=args.host, port=args.port)
     except KeyboardInterrupt:
         print("收到中断，已停止")
     finally:
         conn.close()
+    return 0
+
+
+def _rate(numerator: int, denominator: int) -> str:
+    """转化率：分母为 0（那天没人来过付费页）时如实说「—」，不编一个数字。"""
+    if denominator <= 0:
+        return "—"
+    return f"{numerator / denominator * 100:.1f}%"
+
+
+def _cmd_site_stats(args: argparse.Namespace) -> int:
+    """站点统计：某天的访问量 / 付费页人数 / 下单转化 / 留资数（AC-9）；--prune 做 90 天保留。"""
+    from danmu_intel.site_stats import daily
+
+    conn = open_db()
+    try:
+        if args.prune:
+            print(daily.prune(conn, retention_days=args.retention_days).summary())
+        summary = daily.summary(conn, args.day or daily.today())
+        recent = daily.recent_days(conn, limit=args.limit)
+    finally:
+        conn.close()
+    print(
+        f"{summary.day}｜页面访问 {summary.page_views} 次｜会话 {summary.sessions}｜"
+        f"独立访客 {summary.unique_visitors}"
+    )
+    print(
+        f"  付费页 {summary.paid_page_views} 次 / {summary.paid_unique_visitors} 人｜"
+        f"留资 {summary.leads}｜下单 {summary.orders}"
+        f"（转化 {_rate(summary.orders, summary.paid_unique_visitors)}）｜"
+        f"付费 {summary.paid_orders}（转化 {_rate(summary.paid_orders, summary.paid_unique_visitors)}）"
+    )
+    print(f"  最近有数据的日期（{len(recent)} 天）：{'、'.join(recent) or '还没有任何访问'}")
+    print("  口径：独立访客 = sha256(每日盐 + IP + UA)，每日换盐；统计答不了「具体是谁」（AC-9）")
     return 0
 
 
@@ -1207,10 +1246,21 @@ def build_parser() -> argparse.ArgumentParser:
     grant_cmd.add_argument("--actor", default="管理员", help="操作者（进审计）")
     grant_cmd.set_defaults(func=_cmd_grant)
 
-    serve = sub.add_parser("serve", help="HTTP 面：下单 / 领取 / 校验 / 付费正文")
+    serve = sub.add_parser("serve", help="HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报")
     serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认只监听本机，公网靠 Funnel）")
     serve.add_argument("--port", type=int, default=8080)
     serve.set_defaults(func=_cmd_serve)
+
+    site_stats = sub.add_parser(
+        "site-stats", help="站点统计：某天的访问量/付费页人数/下单转化/留资（--prune 做 90 天保留）"
+    )
+    site_stats.add_argument("--day", default=None, help="日期 YYYY-MM-DD（缺省今天）")
+    site_stats.add_argument(
+        "--prune", action="store_true", help="把超过保留期的明细汇总入 stats_daily 后删除（cron 友好）"
+    )
+    site_stats.add_argument("--retention-days", type=int, default=90, help="明细保留天数（默认 90）")
+    site_stats.add_argument("--limit", type=int, default=30, help="列出的「最近有数据的日期」条数")
+    site_stats.set_defaults(func=_cmd_site_stats)
 
     chain_usage = sub.add_parser("chain-usage", help="供应商额度：当日/当月用量、上限、游标")
     chain_usage.set_defaults(func=_cmd_chain_usage)

@@ -11,9 +11,9 @@
 | `orders` | 订单状态机（pending/short/paid/expired）与收款要求（地址 / memo / 金额尾数） |
 | `verify` | 凭据发放与校验（只存哈希、防枚举、限流） |
 | `settle` | 链上入账 → 订单匹配 → 幂等开通（AC-3/4/5/7） |
-| `api` | 对外 HTTP 面（下单 / 领取 / 校验 / 付费正文），供 Tailscale Funnel 转发 |
 
-三条贯穿全包的硬规矩：
+对外 HTTP 面（下单 / 领取 / 校验 / 付费正文 / 统计上报）在 `danmu_intel/api.py`：
+它横跨收款与统计两个领域，因此不挂在任何一个领域包下面。三条贯穿全包的硬规矩：
 
 1. **手上没有任何可动用资产的凭据**：只有 xpub、派生地址、Solana 收款地址与 memo；
    没有私钥、助记词、keystore、交易所 key（FR-C6-17..19 / AC-12）。
