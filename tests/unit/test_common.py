@@ -159,6 +159,9 @@ def test_db_creates_all_tables(data_root):
             "room_sessions",
             "rooms",
             "slices",
+            "stats_daily",
+            "stats_events",
+            "stats_salt",
         ]
         assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
     finally:
