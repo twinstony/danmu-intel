@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import date
 
 from danmu_intel import archive
@@ -48,8 +49,6 @@ def test_archive_refuses_to_write_onto_the_same_disk(conn, data_root, capsys):
 
 def test_archive_reports_anomalies_with_a_non_zero_exit(conn, data_root, capsys):
     """超期却没进索引的文件：列出来、非零退出（cron 会因此报警），不动它。"""
-    import json
-
     stray = data_root / "raw/huya/2026-02-10/660000-09.jsonl"
     stray.parent.mkdir(parents=True, exist_ok=True)
     stray.write_text(json.dumps({"ts": 1}) + "\n", encoding="utf-8")
