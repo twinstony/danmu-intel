@@ -166,19 +166,22 @@ def run_loop(
     interval: float | None = None,
     clock: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
+    now: Callable[[], int] | None = None,
     on_pass: Callable[[Pass], None] | None = None,
 ) -> int:
     """常驻投递：每 `interval` 秒扫一遍；`seconds` 给了就跑满那么久（0 = 只跑一轮）。
 
-    返回扫描轮数。闸门与抑制都在 `deliver_once` 里，本函数只管节奏 ——
-    `clock` / `sleep` 可注入，测试因此不用真的等 30 秒。
+    返回扫描轮数。闸门与抑制都在 `deliver_once` 里，本函数只管节奏。
+    三个注入缝各管一件事：`clock`（单调）排扫描节奏，`now`（墙钟）算时效闸门，
+    `sleep` 跳过等待 —— 测试三个都注入，因此不用真的等 30 秒、也不依赖"今天是哪一天"。
     """
     cfg = config or load_notify_config(conn)
     period = cfg.scan_interval_s if interval is None else interval
+    wall = now or notifications.now_ms
     deadline = None if seconds is None else clock() + seconds
     passes = 0
     while True:
-        result = deliver_once(conn, channels=channels, config=cfg)
+        result = deliver_once(conn, channels=channels, config=cfg, now=wall())
         passes += 1
         if on_pass is not None:
             on_pass(result)
@@ -189,6 +192,8 @@ def run_loop(
         if remaining <= 0:
             return passes
         sleep(min(period, remaining))
+        if clock() >= deadline:
+            return passes
 
 
 def _attempt(
