@@ -17,6 +17,7 @@ from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
 from danmu_intel.common.events import DanmuEvent
 from danmu_intel.common.matches import create_match
+from danmu_intel.notify.channels import ChannelError
 from danmu_intel.slice.manual import add_manual_slice
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -220,3 +221,21 @@ def load_fixture(platform: str) -> list[dict]:
     """读某个平台的脱敏录制帧（契约测试与适配器单测共用）。"""
     path = PLATFORM_FRAMES[platform]
     return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+class FakeChannel:
+    """假通知通道（T11）：记下发出的文本；`fails` 是还要失败几次（模拟断网 / 限速）。
+
+    投递测试一律用假通道，因此**不连外网、也不碰真凭据**（ADR-0010 / AC-14）。
+    """
+
+    def __init__(self, name: str = "qq", *, fails: int = 0) -> None:
+        self.name = name
+        self.fails = fails
+        self.texts: list[str] = []
+
+    def send(self, text: str) -> None:
+        if self.fails > 0:
+            self.fails -= 1
+            raise ChannelError("连不上（URLError）")
+        self.texts.append(text)

@@ -10,6 +10,7 @@ import json
 
 import pytest
 
+from conftest import FakeChannel
 from danmu_intel.notify.channels import (
     QQ_DEFAULT_BASE,
     TG_DEFAULT_BASE,
@@ -38,20 +39,6 @@ class FakeTransport:
         if self.error is not None:
             raise self.error
         return self.responses.pop(0) if self.responses else {}
-
-
-class Recorder:
-    """假通道：只记下发了什么。"""
-
-    def __init__(self, name: str, *, fails: bool = False) -> None:
-        self.name = name
-        self.fails = fails
-        self.texts: list[str] = []
-
-    def send(self, text: str) -> None:
-        if self.fails:
-            raise ChannelError(f"{self.name} 挂了")
-        self.texts.append(text)
 
 
 # —— QQ Bot ——
@@ -173,28 +160,28 @@ def test_telegram_http_error_propagates_as_channel_error():
 
 
 def test_critical_goes_to_both_channels_and_records_both():
-    qq, tg = Recorder("qq"), Recorder("telegram")
+    qq, tg = FakeChannel("qq"), FakeChannel("telegram")
 
     assert ChannelSet(primary=qq, backup=tg).send("高危", severity="critical") == "qq+telegram"
     assert qq.texts == ["高危"] and tg.texts == ["高危"]
 
 
 def test_warning_goes_to_primary_only():
-    qq, tg = Recorder("qq"), Recorder("telegram")
+    qq, tg = FakeChannel("qq"), FakeChannel("telegram")
 
     assert ChannelSet(primary=qq, backup=tg).send("中危", severity="warning") == "qq"
     assert tg.texts == []
 
 
 def test_backup_covers_a_dead_primary_for_non_critical():
-    qq, tg = Recorder("qq", fails=True), Recorder("telegram")
+    qq, tg = FakeChannel("qq", fails=99), FakeChannel("telegram")
 
     assert ChannelSet(primary=qq, backup=tg).send("中危", severity="warning") == "telegram"
     assert tg.texts == ["中危"]
 
 
 def test_all_channels_down_is_an_error_listing_each_failure():
-    qq, tg = Recorder("qq", fails=True), Recorder("telegram", fails=True)
+    qq, tg = FakeChannel("qq", fails=99), FakeChannel("telegram", fails=99)
 
     with pytest.raises(ChannelError) as excinfo:
         ChannelSet(primary=qq, backup=tg).send("x", severity="critical")
@@ -204,7 +191,7 @@ def test_all_channels_down_is_an_error_listing_each_failure():
 
 
 def test_single_channel_set_needs_no_backup():
-    qq = Recorder("qq")
+    qq = FakeChannel("qq")
     assert ChannelSet(primary=qq).send("x", severity="critical") == "qq"
 
 

@@ -36,6 +36,15 @@
     danmu-intel chain-watch --orders                    # 从待付订单派生监听目标并对账开通（AC-3）
     danmu-intel site-stats --day 2026-09-22             # 那天多少人来过付费页（AC-9：答不了是谁）
     danmu-intel site-stats --prune                      # 站点统计：90 天明细先汇总入 stats_daily 再删
+    danmu-intel notify                                  # 投递待投递事件（统一 5 分钟时效闸门，一轮）
+    danmu-intel notify --loop                           # 常驻 notifier：每 30 秒扫一遍（systemd 拉起的那个）
+    danmu-intel alerts                                  # 告警台账：同一 alert_key 发生几次、恢复了没
+    danmu-intel notify-config --set cooldown_ms=600000  # 通知门槛（闸门/冷却期/扫描间隔/尝试次数）
+
+`notify` 的通道凭据（`QQ_BOT_APP_ID` / `QQ_BOT_APP_SECRET` / `QQ_BOT_OPENID` 或
+`QQ_BOT_GROUP_OPENID`；备通道 `TG_BOT_TOKEN` / `TG_CHAT_ID`）同样只放仓库外 `.env`（0600）。
+一个通道都没配时 `notify` 直接非零退出：不假装送达。超 5 分钟未送达的通知被销毁
+（`state='dropped_expired'`，不补发），同 `alert_key` 冷却期内只发一次，恢复时发一条恢复通知。
 
 `chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
 一次调用记一次 `quota_usage`，用量 >80% 或撞限速都会写一条待投递报警（投递属 T11）。
@@ -410,6 +419,110 @@ def _cmd_config(args: argparse.Namespace) -> int:
         conn.close()
     for key, value in sorted(config.as_dict().items()):
         print(f"{key} = {json.dumps(value, ensure_ascii=False)}")
+    return 0
+
+
+def _cmd_notify_config(args: argparse.Namespace) -> int:
+    """通知门槛（闸门 / 冷却期 / 扫描间隔 / 尝试次数）：改动留审计。"""
+    from danmu_intel.notify.config import load_notify_config, save_notify_config
+
+    conn = open_db()
+    try:
+        if args.set:
+            changes = _parse_config_changes(args.set)
+            config = save_notify_config(conn, actor=args.actor, changes=changes)
+            print(f"已更新通知门槛（操作者 {args.actor}）：{json.dumps(changes, ensure_ascii=False)}")
+        else:
+            config = load_notify_config(conn)
+    finally:
+        conn.close()
+    for key, value in sorted(config.as_dict().items()):
+        print(f"{key} = {json.dumps(value, ensure_ascii=False)}")
+    return 0
+
+
+def _cmd_notify(args: argparse.Namespace) -> int:
+    """投递待投递事件：统一 5 分钟时效闸门（ADR-0010）。
+
+    缺省只跑一轮（cron 友好）；`--loop` 才是常驻的 notifier（systemd 拉起的那个）。
+    一个通道都没配直接非零退出 —— 宁可报错也不假装送达。
+    """
+    from danmu_intel.common.notifications import counts
+    from danmu_intel.notify import (
+        ChannelNotConfigured,
+        channels_from_credentials,
+        deliver_once,
+        load_notify_config,
+        run_loop,
+    )
+
+    conn = open_db()
+    try:
+        config = load_notify_config(conn)
+        try:
+            channels = channels_from_credentials()
+        except ChannelNotConfigured as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            return 2
+        if args.loop:
+            def report(result) -> None:
+                print(result.summary())
+                for outcome in result.outcomes:
+                    print(_outcome_line(outcome))
+
+            passes = run_loop(
+                conn,
+                channels=channels,
+                config=config,
+                seconds=args.seconds,
+                interval=args.interval,
+                on_pass=report,
+            )
+            print(f"投递循环结束：{passes} 轮（间隔 {args.interval or config.scan_interval_s:.0f} 秒）")
+        else:
+            result = deliver_once(conn, channels=channels, config=config)
+            for outcome in result.outcomes:
+                print(_outcome_line(outcome))
+            print(result.summary())
+        print(_queue_line(counts(conn)))
+    finally:
+        conn.close()
+    return 0
+
+
+def _outcome_line(outcome) -> str:
+    channel = f"［{outcome.channel}］" if outcome.channel else ""
+    detail = f"｜{outcome.detail}" if outcome.detail else ""
+    return f"#{outcome.id} {outcome.kind}（{outcome.severity}）→ {outcome.label}{channel}{detail}"
+
+
+def _queue_line(counts: dict[str, int]) -> str:
+    order = ("pending", "delivered", "suppressed", "dropped_expired", "failed")
+    parts = [f"{state} {counts.get(state, 0)}" for state in order]
+    return "通知队列：" + "｜".join(parts)
+
+
+def _cmd_alerts(args: argparse.Namespace) -> int:
+    """告警台账：同一 `alert_key` 发生几次、上次何时发的、恢复了没有。"""
+    from danmu_intel.common.notifications import counts
+    from danmu_intel.notify import list_alerts
+
+    conn = open_db()
+    try:
+        alerts = list_alerts(conn, state=args.state, limit=args.limit)
+        queue = counts(conn)
+    finally:
+        conn.close()
+    print(_queue_line(queue))
+    if not alerts:
+        print("没有告警台账记录（同一 alert_key 的抑制与恢复都记在这里）")
+        return 0
+    for alert in alerts:
+        print(
+            f"{alert.alert_key}｜{alert.state}｜发生 {alert.count} 次"
+            f"｜首见 {_stamp(alert.first_seen)}｜最近 {_stamp(alert.last_seen)}"
+            f"｜最后送达 {_stamp(alert.last_sent_at)}｜恢复 {_stamp(alert.resolved_at)}"
+        )
     return 0
 
 
@@ -1143,6 +1256,22 @@ def build_parser() -> argparse.ArgumentParser:
     config_cmd.add_argument("--set", action="append", default=None, metavar="KEY=VALUE", help="改门槛，可重复")
     config_cmd.add_argument("--actor", default="管理员", help="操作者（进审计）")
     config_cmd.set_defaults(func=_cmd_config)
+
+    notify = sub.add_parser("notify", help="投递待投递事件（QQ Bot 主 + TG 备，统一 5 分钟时效闸门）")
+    notify.add_argument("--loop", action="store_true", help="常驻：每 30 秒扫一遍（缺省只跑一轮，cron 友好）")
+    notify.add_argument("--seconds", type=float, default=None, help="常驻模式的总运行时长（秒），缺省一直跑")
+    notify.add_argument("--interval", type=float, default=None, help="扫描间隔（秒，缺省读配置：30）")
+    notify.set_defaults(func=_cmd_notify)
+
+    alerts_cmd = sub.add_parser("alerts", help="告警台账（同 alert_key 的次数/抑制/恢复）+ 队列状态")
+    alerts_cmd.add_argument("--state", default=None, help="firing | resolved")
+    alerts_cmd.add_argument("--limit", type=int, default=20)
+    alerts_cmd.set_defaults(func=_cmd_alerts)
+
+    notify_config = sub.add_parser("notify-config", help="通知门槛（闸门/冷却期/扫描间隔/尝试次数，改动留审计）")
+    notify_config.add_argument("--set", action="append", default=None, metavar="KEY=VALUE", help="改门槛，可重复")
+    notify_config.add_argument("--actor", default="管理员", help="操作者（进审计）")
+    notify_config.set_defaults(func=_cmd_notify_config)
 
     report = sub.add_parser("report", help="生成并发布一份报告（三形态）")
     report.add_argument("--match-id", type=int, required=True)

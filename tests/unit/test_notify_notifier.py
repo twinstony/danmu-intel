@@ -30,30 +30,10 @@ from danmu_intel.notify.notifier import (
 )
 from danmu_intel.notify.suppression import FIRING, RECOVERY_SUFFIX, admit, alert_key, get_alert, note_sent, resolve
 
-from conftest import BASE_TS
+from conftest import BASE_TS, FakeChannel
 
 GATE_MS = 5 * 60 * 1000
 CFG = NotifyConfig()
-
-
-class FakeChannel:
-    """假通道：记下发出的文本；`fails` 为真时一律抛错（模拟断网 / 限速）。"""
-
-    def __init__(self, name: str = "qq", *, fails: int = 0) -> None:
-        self.name = name
-        self.fails = fails
-        self.texts: list[str] = []
-
-    def send(self, text: str) -> None:
-        if self.fails > 0:
-            self.fails -= 1
-            raise ChannelError("连不上（URLError）")
-        self.texts.append(text)
-
-
-def channels(*extra: FakeChannel) -> ChannelSet:
-    primary = FakeChannel("qq")
-    return ChannelSet(primary=primary, backup=extra[0] if extra else None)
 
 
 def disk_low(conn, *, at=BASE_TS, room="660000", severity="critical", detail=None):

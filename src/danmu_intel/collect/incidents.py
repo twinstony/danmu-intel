@@ -1,8 +1,8 @@
 """采集异常事件（设计 §7.5；issue #5 §6）。
 
-**异常不得静默**。进程退出、心跳僵死、重启超限、无首条消息、断流重连、磁盘不足
-六类异常各写一行 `notifications(state='pending')`，把原因与当时的数据留在库里；
-投递（统一 5 分钟时效闸门）由 T11 的通知器来接——本模块只负责"产生事件"。
+**异常不得静默**。进程退出、心跳僵死、重启超限、无首条消息、断流重连、磁盘不足、
+落盘丢包七类异常各写一行 `notifications(state='pending')`，把原因与当时的数据留在库里；
+投递（统一 5 分钟时效闸门）由 `notify/` 的通知器来接——本模块只负责"产生事件"。
 
 事件的写与查在 `common/notifications.py`（出口是共享的：解读层的成本闸报警也走同一张表），
 本模块定义**采集异常的类别**并做校验。
@@ -26,11 +26,25 @@ RESTART_EXCEEDED = "restart_exceeded"  # 30 分钟内重启超上限，停止重
 NO_STREAM = "no_stream"  # 120 秒没有首条弹幕
 STALLED = "stalled"  # 60 秒无消息，触发重连
 DISK_LOW = "disk_low"  # 数据盘可用空间低于下限
+DROP_RATE_HIGH = "drop_rate_high"  # 落盘丢包率超阈
 
-KINDS = (PROCESS_EXIT, PROCESS_HUNG, RESTART_EXCEEDED, NO_STREAM, STALLED, DISK_LOW)
+KINDS = (
+    PROCESS_EXIT,
+    PROCESS_HUNG,
+    RESTART_EXCEEDED,
+    NO_STREAM,
+    STALLED,
+    DISK_LOW,
+    DROP_RATE_HIGH,
+)
+
+#: 落盘丢包率上限（设计 §15 #3：`drop_count / msg_count > 2%` 即报警）。
+DROP_RATE_MAX = 0.02
 
 __all__ = [
     "DISK_LOW",
+    "DROP_RATE_HIGH",
+    "DROP_RATE_MAX",
     "KINDS",
     "NO_STREAM",
     "PROCESS_EXIT",

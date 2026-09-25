@@ -27,6 +27,7 @@ from dataclasses import dataclass
 
 from danmu_intel.billing.pricing import load_billing_config
 from danmu_intel.common import audit
+from danmu_intel.common.notifications import emit
 
 #: 允许的通讯平台（需求 Q-5：沿用既有做法；本站不接第三方登录，只存标识）。
 CONTACT_PLATFORMS = ("telegram", "qq")
@@ -39,6 +40,9 @@ MEMBER_GRANTED = "billing.member.granted"
 MEMBER_REVOKED = "billing.member.revoked"
 MEMBER_EXPIRED = "billing.member.expired"
 MEMBER_GRACE = "billing.member.grace"
+
+#: 到期降级批处理失败的待投递通知类型（设计 §15 #10）。
+MEMBER_SWEEP_FAILED = "billing_member_sweep_failed"
 
 _TELEGRAM_USERNAME = re.compile(r"^[A-Za-z][A-Za-z0-9_]{4,31}$")
 _QQ_NUMBER = re.compile(r"^[1-9][0-9]{4,11}$")
@@ -290,11 +294,16 @@ def sweep(
 
     时间是可注入的（`now`），于是「到期 → 宽限 → 降级 → 续费顺延」这条时间线
     在测试里可以一步跨过去，不需要真的等一天。
+
+    **批处理失败不静默**（设计 §15 #10）：单个会员降级出错不拖垮整批（余下的照做），
+    失败名单汇总成一条 `billing_member_sweep_failed` 待投递通知 —— 批处理"跑过了"
+    不等于"每个人都降对了"。
     """
     stamp = now_ms() if now is None else now
     if grace_ms is None:
         grace_ms = load_billing_config(conn).grace_ms
     changed: list[Member] = []
+    failures: list[dict[str, object]] = []
     rows = conn.execute(
         "SELECT * FROM members WHERE status IN ('active', 'grace') AND expires_at IS NOT NULL"
     ).fetchall()
@@ -306,20 +315,35 @@ def sweep(
         status = "expired" if expired else "grace"
         if status == member.status:
             continue
-        conn.execute("UPDATE members SET status=? WHERE id=?", (status, member.id))
-        conn.commit()
-        audit.record(
+        try:
+            conn.execute("UPDATE members SET status=? WHERE id=?", (status, member.id))
+            conn.commit()
+            audit.record(
+                conn,
+                actor="billing-sweep",
+                action=MEMBER_EXPIRED if expired else MEMBER_GRACE,
+                target=str(member.id),
+                detail={
+                    "from_status": member.status,
+                    "to_status": status,
+                    "expires_at": member.expires_at,
+                    "grace_ms": grace_ms,
+                },
+                ts=stamp,
+            )
+            changed.append(get_member(conn, member.id))
+        except Exception as exc:  # 一个会员出错不得把剩下的会员都噎在待降级状态
+            failures.append({"member_id": member.id, "to_status": status, "error": str(exc)})
+    if failures:
+        emit(
             conn,
-            actor="billing-sweep",
-            action=MEMBER_EXPIRED if expired else MEMBER_GRACE,
-            target=str(member.id),
-            detail={
-                "from_status": member.status,
-                "to_status": status,
-                "expires_at": member.expires_at,
-                "grace_ms": grace_ms,
+            MEMBER_SWEEP_FAILED,
+            severity="warning",
+            payload={
+                "failed": len(failures),
+                "changed": len(changed),
+                "members": failures[:10],
             },
-            ts=stamp,
+            timestamp=stamp,
         )
-        changed.append(get_member(conn, member.id))
     return changed

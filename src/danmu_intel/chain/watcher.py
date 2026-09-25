@@ -158,11 +158,15 @@ class Watcher:
             self._sleep(min(interval, remaining))
 
     def check_quota(self) -> list[str]:
-        """额度越线的供应商：报警（同窗口只报一次）并返回说明，供 CLI 打印。"""
+        """额度越线的供应商：报警（同窗口只报一次）并返回说明，供 CLI 打印。
+
+        额度回落（不再越线）同样要说话：把台账转 `resolved` 并发一条恢复通知。
+        """
         crossed: list[str] = []
         for ledger in self._ledgers.values():
             usage = ledger.usage()
             if not usage.over_threshold:
+                self._gate.forget(alerts.QUOTA_HIGH, provider=usage.provider)
                 continue
             self._gate.emit(
                 alerts.QUOTA_HIGH,
