@@ -26,6 +26,8 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("AWS key id", re.compile(r"\bAKIA[0-9A-Z]{16}\b")),
     ("Telegram bot token", re.compile(r"\b\d{8,10}:AA[A-Za-z0-9_-]{30,}\b")),
     ("keystore 文件", re.compile(r"UTC--\d{4}-\d{2}-\d{2}T.*--[0-9a-fA-F]{40}")),
+    # BIP32 扩展**私钥**：派生地址只需要 xpub（watch-only），xprv 一出现就是凭据泄露
+    ("扩展私钥", re.compile(r"\b(?:xprv|yprv|zprv|tprv|uprv|vprv)[1-9A-HJ-NP-Za-km-z]{80,}")),
 )
 
 # 只扫这些扩展名（其余按二进制跳过）

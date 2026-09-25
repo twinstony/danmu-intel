@@ -27,6 +27,13 @@
     danmu-intel chain-watch --polygon-address 0x… --solana-address …   # 链上监听（60s 轮询 + 启动补扫）
     danmu-intel chain-watch --polygon-address 0x… --once              # 只跑一轮增量（按游标，cron 友好）
     danmu-intel chain-usage                            # 供应商额度：当日/当月用量、上限、游标
+    danmu-intel billing                                 # 档位/价格/宽限期/收款配置（改价格留审计）
+    danmu-intel subscribe --platform telegram --username @name --tier standard --network polygon
+    danmu-intel orders                                  # 订单列表（状态/金额/差额/到期）
+    danmu-intel members                                 # 会员列表；--sweep 执行到期降级
+    danmu-intel grant --order-ref DM… --tx-ref 0x… --reason "…"   # 人工补开通（AC-5）
+    danmu-intel serve                                   # HTTP 面：下单 / 领取 / 校验 / 付费正文
+    danmu-intel chain-watch --orders                    # 从待付订单派生监听目标并对账开通（AC-3）
 
 `chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
 一次调用记一次 `quota_usage`，用量 >80% 或撞限速都会写一条待投递报警（投递属 T11）。
@@ -695,14 +702,24 @@ def _cmd_match_set_state(args: argparse.Namespace) -> int:
     return 0
 
 
-def _chain_targets(args: argparse.Namespace) -> list:
-    """监听目标：一类一条命令行参数，可重复（T9 会把订单地址喂进来）。"""
+def _chain_targets(args: argparse.Namespace, conn=None) -> list:
+    """监听目标：`--orders` 时从待付订单派生（T9），否则按显式地址（T8 的运维用法）。"""
     from danmu_intel.chain.watcher import WatchTarget
 
+    if getattr(args, "orders", False):
+        from danmu_intel.billing import settle
+
+        targets = settle.watch_targets(conn)
+        if not targets:
+            raise ValueError(
+                "当前没有待付款的订单：--orders 从订单派生监听目标（过期订单不再轮询，"
+                "补扫请用 --polygon-address/--solana-address）"
+            )
+        return targets
     targets = [WatchTarget(network="polygon", address=item) for item in args.polygon_address or []]
     targets += [WatchTarget(network="solana", address=item) for item in args.solana_address or []]
     if not targets:
-        raise ValueError("至少要给一个监听地址：--polygon-address 或 --solana-address")
+        raise ValueError("至少要给一个监听地址：--polygon-address 或 --solana-address（或 --orders）")
     return targets
 
 
@@ -730,10 +747,34 @@ def _print_transfer(transfer: Transfer) -> None:
 
 
 def _cmd_chain_watch(args: argparse.Namespace) -> int:
-    """链上监听：启动补扫（不看游标）→ 每 60 秒按游标增量轮询（ADR-0005 双重路径）。"""
-    targets = _chain_targets(args)
+    """链上监听：启动补扫（不看游标）→ 每 60 秒按游标增量轮询（ADR-0005 双重路径）。
+
+    `--orders` 时顺手把看见的入账对到订单上（AC-3：入账 → 自动开通，全程无人工）。
+    """
+    from danmu_intel.billing import settle
+
     conn = open_db()
+    settle_failures: list[str] = []
+
+    def handle(transfer: Transfer) -> None:
+        _print_transfer(transfer)
+        if not args.orders:
+            return
+        outcome = settle.settle(conn, [transfer])
+        for payment in outcome.payments:
+            print(f"  对账｜{payment.public_ref}｜{payment.label}｜{payment.units}")
+        for member_id in outcome.granted:
+            print(f"  已开通会员 #{member_id}（幂等：同一笔交易只开通一次）")
+        settle_failures.extend(outcome.failures)
+        for failure in outcome.failures:
+            print(f"  开通失败｜{failure}", file=sys.stderr)
+
     try:
+        try:
+            targets = _chain_targets(args, conn)
+        except ValueError as exc:
+            print(f"错误：{exc}", file=sys.stderr)
+            return 2
         try:
             watcher = _chain_watcher(conn, targets)
         except CredentialError as exc:
@@ -743,18 +784,18 @@ def _cmd_chain_watch(args: argparse.Namespace) -> int:
             print(f"补扫 {len(targets)} 个地址（按地址查全历史，不依赖游标）")
             observation = watcher.rescan()
             for transfer in observation.transfers:
-                _print_transfer(transfer)
+                handle(transfer)
         elif args.once:
             observation = watcher.poll()
             for transfer in observation.transfers:
-                _print_transfer(transfer)
+                handle(transfer)
         else:
             print(
                 f"开始监听 {len(targets)} 个地址：启动补扫 → 每 {args.interval:.0f} 秒增量轮询"
                 + ("，持续运行" if args.seconds is None else f"，共 {args.seconds:.0f} 秒")
             )
             observation = watcher.run(
-                seconds=args.seconds, interval=args.interval, on_transfer=_print_transfer
+                seconds=args.seconds, interval=args.interval, on_transfer=handle
             )
         crossed = watcher.check_quota()
         for summary in crossed:
@@ -767,7 +808,178 @@ def _cmd_chain_watch(args: argparse.Namespace) -> int:
         f"本轮共看见 {len(observation.transfers)} 笔入账"
         f"（扫描失败 {len(observation.failures)} 个目标）"
     )
-    return 1 if observation.failures else 0
+    return 1 if observation.failures or settle_failures else 0
+
+
+def _cmd_billing(args: argparse.Namespace) -> int:
+    """档位、价格、宽限期与收款配置（`config` 表的 `billing` 键；改动留审计）。"""
+    from danmu_intel.billing import pricing
+
+    conn = open_db()
+    try:
+        if args.set:
+            changes = _parse_billing_changes(args.set)
+            config = pricing.save_billing_config(conn, actor=args.actor, changes=changes)
+            print(f"已更新收款配置（操作者 {args.actor}）：{json.dumps(changes, ensure_ascii=False)}")
+        else:
+            config = pricing.load_billing_config(conn)
+    finally:
+        conn.close()
+    for tier in config.tiers:
+        print(
+            f"档位 {tier.key}（{tier.label}）：{pricing.format_units(tier.amount_units)} "
+            f"{pricing.ASSET_SYMBOL} / {tier.days} 天"
+        )
+    print(
+        f"订单时效 {config.order_ttl_ms / 60000:.0f} 分钟｜宽限期 {config.grace_ms / 3600000:.0f} 小时"
+    )
+    print(f"Polygon xpub（watch-only）：{_mask(config.polygon_xpub) or '未配置'}")
+    print(f"Solana 收款地址：{config.solana_address or '未配置'}")
+    print(f"订阅页 API 基址：{config.api_base or '未配置'}")
+    print("收款资产：Polygon USDT 合约 / Solana USDT mint（公开常量，不是凭据）")
+    return 0
+
+
+def _parse_billing_changes(values: list[str]) -> dict[str, object]:
+    """`key=value`；值是 JSON 就按 JSON 解析，否则当字符串（xpub、地址都是裸串）。"""
+    changes: dict[str, object] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(f"--set 格式应为 key=value，收到：{value}")
+        key, raw = value.split("=", 1)
+        try:
+            changes[key.strip()] = json.loads(raw)
+        except json.JSONDecodeError:
+            changes[key.strip()] = raw
+    return changes
+
+
+def _mask(secret_like: str) -> str:
+    """展示用的截断（xpub 是公开信息，但不整串刷屏）。"""
+    if not secret_like:
+        return ""
+    return secret_like if len(secret_like) <= 24 else f"{secret_like[:16]}…{secret_like[-6:]}"
+
+
+def _cmd_subscribe(args: argparse.Namespace) -> int:
+    """下单：生成收款要求（命令行等价物；用户走订阅页 → `POST /api/orders`）。"""
+    from danmu_intel.billing import orders, pricing
+
+    conn = open_db()
+    try:
+        order, claim_token = orders.create_order(
+            conn,
+            platform=args.platform,
+            username=args.username,
+            tier=args.tier,
+            network=args.network,
+        )
+    finally:
+        conn.close()
+    if args.json:
+        print(json.dumps({**order.as_dict(), "claim_token": claim_token}, ensure_ascii=False, indent=2))
+        return 0
+    memo = f"｜memo {order.memo}" if order.memo else ""
+    print(f"订单 {order.public_ref}（{order.tier}｜{order.network}）")
+    print(f"  应付 {order.amount_display} {pricing.ASSET_SYMBOL}（已含唯一尾数，请精确转账）")
+    print(f"  收款地址 {order.address}{memo}")
+    print(f"  有效期至 {_stamp(order.expires_at)}（超时未付即过期，已展示的地址不再复用）")
+    if claim_token:
+        print(f"  领取令牌 {claim_token}（**只显示这一次**，付款后凭它领凭据）")
+    else:
+        print("  该订单已存在（复用）：领取令牌已轮换，请用页面里那一枚")
+    print(
+        "  付款到账会自动开通（无需人工）；随后 POST /api/claim "
+        f'{{"platform":"{args.platform}","username":"{args.username}",'
+        f'"order_ref":"{order.public_ref}","claim_token":"…"}} 领取凭据'
+    )
+    return 0
+
+
+def _cmd_orders(args: argparse.Namespace) -> int:
+    from danmu_intel.billing import members, orders
+
+    conn = open_db()
+    try:
+        rows = orders.list_orders(conn, status=args.status, network=args.network, limit=args.limit)
+        contacts = {row.member_id: members.get_member(conn, row.member_id).contact for row in rows}
+    finally:
+        conn.close()
+    if not rows:
+        print("没有订单")
+        return 0
+    for row in rows:
+        extra = f"｜还差 {row.shortage_display}" if row.status == "short" else ""
+        memo = f"｜memo {row.memo}" if row.memo else ""
+        print(
+            f"{row.public_ref}｜{row.status}｜{row.tier}｜{row.network}｜{row.amount_display}"
+            f"{extra}｜{row.address}{memo}｜{contacts[row.member_id]}｜有效期至 {_stamp(row.expires_at)}"
+        )
+    return 0
+
+
+def _cmd_members(args: argparse.Namespace) -> int:
+    """会员列表；`--sweep` 先做一次到期降级（cron 友好：active → grace → expired）。"""
+    from danmu_intel.billing import members
+
+    conn = open_db()
+    try:
+        changed = members.sweep(conn) if args.sweep else []
+        rows = members.list_members(conn, status=args.status, limit=args.limit)
+    finally:
+        conn.close()
+    for member in changed:
+        print(f"到期降级：会员 #{member.id} → {member.status}（{_stamp(member.expires_at)}）")
+    if not rows:
+        print("没有会员")
+        return 0
+    for member in rows:
+        print(
+            f"会员 #{member.id}｜{member.contact}｜{member.tier}｜{member.status}｜"
+            f"到期 {_stamp(member.expires_at)}"
+        )
+    return 0
+
+
+def _cmd_grant(args: argparse.Namespace) -> int:
+    """人工补开通（AC-5 后半段）：凭交易凭证补记一笔入账，必填理由，操作留痕。"""
+    from danmu_intel.billing import settle
+
+    conn = open_db()
+    try:
+        order, opened = settle.manual_payment(
+            conn,
+            order_ref=args.order_ref,
+            tx_ref=args.tx_ref,
+            units=args.units,
+            actor=args.actor,
+            reason=args.reason,
+        )
+    finally:
+        conn.close()
+    if opened:
+        print(f"已人工补开通：订单 {order.public_ref} → {order.status}（交易 {args.tx_ref}，操作者 {args.actor}）")
+        return 0
+    if order.status == "paid":
+        print(f"订单 {order.public_ref} 已是 paid（幂等：没有重复开通）")
+        return 0
+    print(f"订单 {order.public_ref} 仍差 {order.shortage_display}（记了这笔入账，未达应收）")
+    return 1
+
+
+def _cmd_serve(args: argparse.Namespace) -> int:
+    """起 HTTP 面：下单 / 领取 / 校验 / 付费正文（Funnel 转发到本进程）。"""
+    from danmu_intel.billing import api
+
+    conn = open_db()
+    print(f"收款 API 监听 {args.host}:{args.port}（接口：/api/orders、/api/claim、/api/verify、/api/report/…)")
+    try:
+        api.run(conn, host=args.host, port=args.port)
+    except KeyboardInterrupt:
+        print("收到中断，已停止")
+    finally:
+        conn.close()
+    return 0
 
 
 def _cmd_chain_usage(args: argparse.Namespace) -> int:
@@ -951,9 +1163,54 @@ def build_parser() -> argparse.ArgumentParser:
         help="只跑一轮增量扫描（按游标续扫；不跑全历史补扫，cron 友好）",
     )
     chain_watch.add_argument("--rescan", action="store_true", help="只做一次补扫（按地址查全历史，不依赖游标）")
+    chain_watch.add_argument(
+        "--orders", action="store_true",
+        help="监听目标从待付款订单派生，并把入账对账开通（T9 自助闭环；与显式地址二选一）",
+    )
     chain_watch.add_argument("--interval", type=float, default=60.0, help="轮询间隔（秒，默认 60）")
     chain_watch.add_argument("--seconds", type=float, default=None, help="总运行时长（秒），缺省持续运行")
     chain_watch.set_defaults(func=_cmd_chain_watch)
+
+    billing_cmd = sub.add_parser("billing", help="档位/价格/宽限期/收款配置（改动留审计）")
+    billing_cmd.add_argument(
+        "--set", action="append", default=None, metavar="KEY=VALUE",
+        help="改配置，可重复（如 tiers='[{…}]'、polygon_xpub=xpub…、grace_ms=86400000）",
+    )
+    billing_cmd.add_argument("--actor", default="管理员", help="操作者（进审计）")
+    billing_cmd.set_defaults(func=_cmd_billing)
+
+    subscribe = sub.add_parser("subscribe", help="下单：生成收款要求（地址/金额/memo/到期）")
+    subscribe.add_argument("--platform", required=True, help="通讯平台：telegram | qq")
+    subscribe.add_argument("--username", required=True, help="通讯账号标识（Telegram @name 或 QQ 号）")
+    subscribe.add_argument("--tier", required=True, help="档位：standard | trial")
+    subscribe.add_argument("--network", required=True, help="收款网络：polygon | solana")
+    subscribe.add_argument("--json", action="store_true", help="按 JSON 输出（含领取令牌）")
+    subscribe.set_defaults(func=_cmd_subscribe)
+
+    orders_cmd = sub.add_parser("orders", help="订单列表（状态/金额/差额/地址/到期）")
+    orders_cmd.add_argument("--status", default=None, help="pending|short|paid|expired")
+    orders_cmd.add_argument("--network", default=None, help="polygon|solana")
+    orders_cmd.add_argument("--limit", type=int, default=20)
+    orders_cmd.set_defaults(func=_cmd_orders)
+
+    members_cmd = sub.add_parser("members", help="会员列表；--sweep 执行到期降级（active→grace→expired）")
+    members_cmd.add_argument("--status", default=None, help="pending|active|grace|expired|revoked")
+    members_cmd.add_argument("--limit", type=int, default=50)
+    members_cmd.add_argument("--sweep", action="store_true", help="先做一次到期降级")
+    members_cmd.set_defaults(func=_cmd_members)
+
+    grant_cmd = sub.add_parser("grant", help="人工补开通（凭交易凭证 + 必填理由，操作留痕）")
+    grant_cmd.add_argument("--order-ref", required=True, help="订单引用（页面上的 DM… 短引用）")
+    grant_cmd.add_argument("--tx-ref", required=True, help="链上交易凭证（交易哈希 / 签名）")
+    grant_cmd.add_argument("--units", type=int, default=None, help="入账金额（最小单位；缺省视为足额）")
+    grant_cmd.add_argument("--reason", required=True, help="补开通理由（必填）")
+    grant_cmd.add_argument("--actor", default="管理员", help="操作者（进审计）")
+    grant_cmd.set_defaults(func=_cmd_grant)
+
+    serve = sub.add_parser("serve", help="HTTP 面：下单 / 领取 / 校验 / 付费正文")
+    serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认只监听本机，公网靠 Funnel）")
+    serve.add_argument("--port", type=int, default=8080)
+    serve.set_defaults(func=_cmd_serve)
 
     chain_usage = sub.add_parser("chain-usage", help="供应商额度：当日/当月用量、上限、游标")
     chain_usage.set_defaults(func=_cmd_chain_usage)

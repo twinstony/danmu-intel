@@ -5,6 +5,9 @@
 - `slice.override`：人工修正切片边界（需求 FR-C2-5「修正结果为准且留痕」）。
 - `slice.boundary`：自动边界裁决的落库结果（采用/跳过都能回答「为什么」）。
 - `config.update`：统计门槛改动（设计 §9.1 灰信号第 4 条「门槛参数写在 config 表，改动留审计」）。
+- `billing.*`（T9）：会员开通/续费（`billing.member.granted`，带 `tx_ref` 幂等键）、
+  到期降级（`billing.member.grace` / `billing.member.expired`）、撤权（`billing.member.revoked`）。
+  资金相关写操作一律留痕（NFR-S-5）：谁、何时、因哪笔交易、开通到何时。
 
 审计条数也是 `metrics.algo_version` 递增的依据：每一次人工修正都进一条 `slice.override`，
 算法版本因此**由输入（审计记录）唯一确定**，而非由时钟或进程状态决定 —— 这样删掉

@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8）
+## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -53,8 +53,22 @@ Solana 走 **Helius**（`getSignaturesForAddress` + `getTransaction`，带每单
 用量、上限、限速与「扫到哪了」。链上数据里只有地址、交易、金额与 memo —— **没有任何可动用
 资产的凭据**（不持有私钥/助记词，API key 只从仓库外 `.env` 读，不进日志与异常消息）。
 
-不含会员付费闭环、通知投递、后台、站点统计（见设计 §19 实施分层）。订单匹配与自助开通（T9）
-消费本层的 `Transfer`，本层不碰订单。
+**T9**：**会员付费全自助闭环** —— 用户选档 → 填既有通讯账号（Telegram @name / QQ 号，**不注册本站账号**）
+→ 拿到**专属收款要求**（Polygon 从 xpub 按 BIP44 `m/44'/60'/0'/0/i` 派生的 watch-only 地址；
+Solana 单一收款地址 + **每单唯一 memo**；金额含唯一小额尾数）→ 链上入账被自动对账
+（`chain-watch --orders` 从订单派生监听目标）→ **到账即自动开通**（**无需人工**）→ 用户凭
+「账号 + 订单引用 + **领取令牌**」自助领取**凭据**（32 字节随机码，**库里只存哈希**）→ 凭据读到
+**付费正文**（`GET /api/report/<id>/<kind>/paid`，正文从不进静态产物）。会员有效期可见、到期有
+**宽限期**（默认 24 小时）内仍可访问、**续费从原到期日顺延**；开通/续费/降级/撤权全部写 `audit_log`。
+**防枚举**：校验/领取接口对「账号不存在」「未开通」「已过期」「凭据不对」「被限流」返回**逐字节相同**
+的响应，账号字段只用于限流分桶、不参与判定 —— 任何人都问不出「某人是不是会员」。
+**幂等**：逐笔入账（`tx_ref` 唯一）+ 开通（按 `tx_ref`）两层幂等键，重复检测只开通一次；
+不足额转「待补款」并告知差额，对不上账 / 多付 / 开通失败都会写报警，**绝不静默**。
+**零资金风险面**：系统只有 xpub、派生地址、memo 与收款地址，**没有任何签名能力**；
+`tools/check_no_secrets.py` 新增「扩展私钥」模式，xprv 一出现就拦。
+
+不含通知投递、后台、站点统计、归档（见设计 §19 实施分层；T9 的到期提醒与凭据重发走通讯渠道，
+属 T11）。
 
 ## 安装
 
@@ -234,6 +248,64 @@ printf 'POLYGONSCAN_API_KEY=%s\nHELIUS_API_KEY=%s\n' '你的 key' '你的 key' \
   >> ~/danmu-intel-data/.env
 ```
 
+### 会员付费怎么跑（T9）
+
+先把收款配置写进去（**只给 xpub，绝不给私钥/助记词**；xpub 是 watch-only 公开信息）：
+
+```bash
+danmu-intel billing                                       # 看档位/价格/宽限期/收款配置
+danmu-intel billing --set polygon_xpub=xpub6… \
+                    --set solana_address=9xQeWv… \
+                    --set api_base=https://<你的>.ts.net:8443 \
+                    --actor 管理员                        # 改动写 config.update 审计
+danmu-intel billing --set 'tiers=[{"key":"standard","label":"标准档","amount_units":5000000,"days":30}]'
+```
+
+档位与价格在 `config` 表（标准档默认 5.00 USDT / 30 天，试用档 0.50 USDT / 3 天；**改价格不影响
+已生效的会员**）。金额一律是最小单位整数（USDT 6 位小数），钱不用浮点算。
+
+**一条命令跑通「下单 → 收钱 → 开通 → 领凭据」**：
+
+```bash
+# ① 用户下单（页面走 POST /api/orders，这里是命令行等价物）
+danmu-intel subscribe --platform telegram --username @reader --tier standard --network polygon
+#    → 订单 DM1A2B3C4D｜应付 5.000001 USDT｜收款地址 0x022b…d6407｜领取令牌（只显示这一次）
+
+# ② 监听 + 对账 + 自动开通（监听目标从待付订单派生，不用手工填地址）
+danmu-intel chain-watch --orders                          # 启动补扫 → 每 60 秒增量轮询 → 对账开通
+danmu-intel chain-watch --orders --once                   # cron 友好：只跑一轮增量
+
+# ③ 运营者视角
+danmu-intel orders                                        # 订单：状态/金额/差额/地址/到期
+danmu-intel members                                       # 会员：状态/到期；--sweep 执行到期降级
+
+# ④ 漏检兜底（AC-5 后半段）：凭交易凭证人工补开通，必填理由，操作留痕且同样幂等
+danmu-intel grant --order-ref DM1A2B3C4D --tx-ref 0x… --reason "用户提供了区块浏览器链接"
+
+# ⑤ 公网接口（Funnel 转发到本进程；下单/领取/校验/付费正文）
+danmu-intel serve --host 127.0.0.1 --port 8080
+```
+
+四个接口：
+
+| 接口 | 作用 |
+|---|---|
+| `POST /api/orders` | 下单：档位 + 通讯账号 + 网络 → 收款要求（地址 / memo / 金额 / 到期）+ 领取令牌 |
+| `POST /api/claim` | 领取凭据：账号 + 订单引用 + 领取令牌 → `Set-Cookie`（HttpOnly + Secure + SameSite=Lax） |
+| `POST /api/verify` | 校验凭据 → 会员状态与有效期（有效期对用户可见） |
+| `GET /api/report/<比赛>/<形态>/paid` | 凭据读取**付费正文**（比赛结束后自动转公开，无需凭据） |
+
+纪律三条：**失败一律同一份响应**（含被限流，逐字节相同，AC-10）；**凭据只存哈希**、明文只在领取
+那一刻出现一次；**领取必须同时持有领取令牌**（只在下单的那个浏览器里，链上 memo 用的是公开引用，
+所以光知道账号领不走别人的会员 —— 理由与偏离说明见 ADR-0017）。
+
+到期降级交给 cron（不引入调度器依赖；哪怕不跑，判定也按时间正确）：
+
+```bash
+*/10 * * * * danmu-intel members --sweep      # active → grace → expired（每次转换写审计）
+* * * * *   danmu-intel chain-watch --orders --once
+```
+
 ### 统计门槛怎么调（T4）
 
 门槛（灰信号 N/M/K、终局信号阈值、边界复核门槛）都在 `config` 表，改动留审计：
@@ -289,6 +361,9 @@ danmu-intel events       --match-id 1   # 采集异常事件（待 T11 通知通
 | **凭据**（`DEEPSEEK_API_KEY` 等） | `~/danmu-intel-data/.env`（**0600，权限不对就拒读**） | 否 |
 | LLM 调用账本 | `db.sqlite3` 的 `llm_calls` 表（成本硬闸的数据源） | 否 |
 | 链上监听游标 | `db.sqlite3` 的 `chain_cursors` 表（一地址一行：扫到哪了） | 否 |
+| 订单与逐笔入账 | `db.sqlite3` 的 `orders` / `order_payments` 表（账本：谁、多少钱、哪笔交易） | 否 |
+| 会员与凭据哈希 | `db.sqlite3` 的 `members` / `member_credentials` 表（**凭据只存 sha256**） | 否 |
+| 档位价格与收款配置 | `db.sqlite3` 的 `config` 表的 `billing` 键（xpub / Solana 地址 / 价格 / 宽限期） | 否 |
 | 供应商额度账本 | `db.sqlite3` 的 `quota_usage` 表（按供应商按日累加；报警阈值的唯一数据源） | 否 |
 | 提示词模板 | `prompts/interpretation/<版本>/` | 是 |
 | 站点产物 | `site/**`（整棵站点树 + `release.json`；暂存目录 `site/.staging/` 不进 git） | 是 |
@@ -340,6 +415,13 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 `tests/unit/test_release.py` 覆盖原子替换、幂等、失败保留上一版、回滚（含账本对齐失败报警）、
 结束转公开，端到端在 `tests/e2e/test_publish_loop.py`（CLI 全流程，全程不联网）。
 
+会员付费的测试缝有三条：**密码学向量**（BIP-0032 官方向量、keccak 已知常量、参考实现算出的
+xpub → 地址链、EIP-55 向量，`tests/unit/test_billing_xpub.py`；xprv 必被拒绝）、
+**状态机与对账**（`tests/unit/test_billing_{members,orders,settle,verify}.py`：顺延/宽限/撤销、
+派生索引只前进、金额尾数、领取令牌轮换、六种失败逐字节相同、限流窗口、重复与不足额）、
+**HTTP 边界**（`tests/e2e/test_billing_loop.py`：真 aiohttp 服务 + 假链，下单 → 入账 → 自动开通 →
+领取凭据 → 读付费正文；含「比赛结束自动转公开」与全库零凭据扫面）。
+
 链上监听的测试缝在**注入的假供应商（假链 + 假时钟）**：`tests/unit/test_chain_polygonscan.py` /
 `test_chain_helius.py` 验纯函数解析（原生/ERC20/SPL 代币、memo、失败交易跳过、翻页与上限、
 限速与错误措辞、凭据不进异常消息），`tests/unit/test_chain_quota.py` 验游标单调性与额度窗口，
@@ -349,6 +431,13 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 
 ## 边界
 
+- **会员付费永不触碰钱**（AC-12 / FR-C6-17..19）：系统只持有 xpub（watch-only）、派生地址、
+  Solana 收款地址、memo 与订单账本；**没有任何签名能力**，也没有私钥、助记词、keystore、
+  交易所 key。xprv 一出现就被扫描器拦下（`tools/check_no_secrets.py` 的「扩展私钥」模式 +
+  `tests/unit/test_billing_xpub.py` 的「扩展私钥必被拒绝」用例）。
+- **会员身份对外零泄露**（NFR-P-1/P-2）：用户名只用于联系与运营者核对，不进任何公开页面、
+  统计与对外响应；校验接口的失败响应逐字节相同，且账号字段**不参与判定** —— 接口回答不了
+  「某人是不是会员」。
 - 公开弹幕是唯一数据来源，不使用任何需要突破访问限制的手段。
 - 原始记录**不落明文身份**：只存平台用户 ID 的加盐哈希（`user_hash`）。
 - 灰信号只作风险提示，不指控、不点名、必须附样本与门槛（需求 §6.5）：产出物结构上装不下
