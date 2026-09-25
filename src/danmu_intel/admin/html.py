@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from html import escape as _escape
+import json
 from typing import Iterable, Sequence
 
 #: 已经转义好的 HTML 片段（`table` 里放链接、标签这类要自己拼的单元格时用它）。
@@ -208,12 +210,13 @@ def form(
     *,
     submit: str = "保存",
     danger: bool = False,
+    method: str = "post",
 ) -> Html:
-    """一个 POST 表单（写操作一律 POST：GET 只读，不被爬虫/预取误触发）。"""
+    """一个表单。写操作一律 POST（GET 只读：不会被爬虫/预取误触发）；筛选器用 GET。"""
     body = "".join(field_.render() for field_ in fields_)
     css = " ghost" if danger else ""
     return raw(
-        f'<form method="post" action="{esc(action)}">{body}'
+        f'<form method="{esc(method)}" action="{esc(action)}">{body}'
         f'<button class="{css.strip()}" type="submit">{esc(submit)}</button></form>'
     )
 
@@ -225,8 +228,6 @@ def inline_form(action: str, fields_: Sequence[Field], *, submit: str) -> Html:
 
 def json_block(value: object, *, limit: int = 600) -> Html:
     """一段 JSON（审计详情、通知 payload 这类结构体在页面上按原文看）。"""
-    import json
-
     text = json.dumps(value, ensure_ascii=False, sort_keys=True)
     if len(text) > limit:
         text = text[: limit - 1] + "…"
@@ -237,8 +238,6 @@ def stamp(ts_ms: int | None) -> str:
     """毫秒时间戳 → 本机时间的可读串（没有就如实写 `-`）。"""
     if not ts_ms:
         return "-"
-    from datetime import datetime
-
     return datetime.fromtimestamp(ts_ms / 1000).strftime("%Y-%m-%d %H:%M:%S")
 
 
