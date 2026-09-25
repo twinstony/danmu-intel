@@ -84,6 +84,7 @@ def clock(monkeypatch):
 
     tick = Clock()
     monkeypatch.setattr(beacon, "now_ms", lambda: tick.now)
+    monkeypatch.setattr(daily, "now_ms", lambda: tick.now)
     return tick
 
 

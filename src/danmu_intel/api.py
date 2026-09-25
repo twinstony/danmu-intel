@@ -205,7 +205,7 @@ async def _handle_beacon(request: web.Request) -> web.Response:
 async def _handle_stats_daily(request: web.Request) -> web.Response:
     """某天的站点统计口径：只有计数，没有任何 IP / 访客哈希 / 身份字段（AC-9）。"""
     conn: sqlite3.Connection = request.app[CONNECTION]
-    day = request.query.get("day") or beacon.day_of(beacon.now_ms())
+    day = request.query.get("day") or daily.today()
     try:
         summary = daily.summary(conn, day)
     except ValueError as exc:

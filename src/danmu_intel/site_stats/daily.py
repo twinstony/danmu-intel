@@ -39,6 +39,11 @@ SESSION_GAP_MS = 30 * 60 * 1000
 DAY_FORMAT = "%Y-%m-%d"
 
 
+def today() -> str:
+    """今天（本地日历日）：接口与命令行都拿它当缺省。"""
+    return day_of(now_ms())
+
+
 def parse_day(day: object) -> str:
     """校验 `YYYY-MM-DD`（对外接口的入参也走这里，避免把脏字符串塞进 SQL）。"""
     text = str(day or "").strip()
