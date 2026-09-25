@@ -10,6 +10,9 @@ T4 加 `gray_signals`（灰信号，含类别与作废原因）、`audit_log`（
 部署与提交指针、本批付费的比赛）。T8 加 `chain_cursors`（链上监听游标，补扫与断点续扫的
 依据）与 `quota_usage`（供应商额度记账，报警阈值的唯一数据源）。
 
+T9 加 `members` / `orders` / `order_payments` / `member_credentials` / `rate_limits`
+（会员付费全自助闭环：会员状态机、订单状态机、逐笔入账幂等、凭据只存哈希、限流桶）。
+
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
 """
@@ -125,6 +128,40 @@ CREATE TABLE IF NOT EXISTS quota_usage(       -- 供应商额度记账（FR-C6-1
   id INTEGER PRIMARY KEY, provider TEXT NOT NULL, day TEXT NOT NULL,
   calls INTEGER NOT NULL DEFAULT 0, credits REAL NOT NULL DEFAULT 0,
   last_error TEXT, updated_at INTEGER NOT NULL, UNIQUE(provider, day));
+
+CREATE TABLE IF NOT EXISTS members(            -- 会员（凭既有通讯账号标识，不注册本站账号）
+  id INTEGER PRIMARY KEY,
+  contact_platform TEXT NOT NULL,              -- telegram|qq
+  username TEXT NOT NULL, username_norm TEXT NOT NULL,   -- 规范化：唯一性判定用
+  tier TEXT NOT NULL,                          -- standard|trial
+  status TEXT NOT NULL,                        -- pending|active|grace|expired|revoked
+  expires_at INTEGER, created_at INTEGER NOT NULL, revoked_at INTEGER,
+  UNIQUE(contact_platform, username_norm));
+
+CREATE TABLE IF NOT EXISTS orders(             -- 订单 = 一个收款要求（专属地址或唯一 memo）
+  id INTEGER PRIMARY KEY, public_ref TEXT NOT NULL UNIQUE,  -- 页面短引用（Solana 的 memo）
+  claim_hash TEXT NOT NULL,                    -- 领取令牌的哈希（明文只在下单那一刻出现）
+  member_id INTEGER NOT NULL, tier TEXT NOT NULL,
+  network TEXT NOT NULL,                       -- polygon|solana
+  address TEXT NOT NULL,                       -- 专属派生地址（polygon）或收款地址（solana）
+  address_index INTEGER,                       -- 派生索引：只前进不回退（防串单）
+  memo TEXT, asset TEXT NOT NULL,
+  amount_due_units INTEGER NOT NULL,           -- 应收（最小单位整数，含唯一尾数）
+  status TEXT NOT NULL,                        -- pending|short|paid|expired
+  created_at INTEGER NOT NULL, expires_at INTEGER NOT NULL, paid_at INTEGER,
+  tx_ref TEXT, paid_units INTEGER NOT NULL DEFAULT 0, shortage_units INTEGER NOT NULL DEFAULT 0);
+
+CREATE TABLE IF NOT EXISTS order_payments(     -- 逐笔入账（tx_ref 唯一 = 幂等键，AC-4）
+  id INTEGER PRIMARY KEY, order_id INTEGER NOT NULL, tx_ref TEXT NOT NULL UNIQUE,
+  network TEXT NOT NULL, asset TEXT NOT NULL, units INTEGER NOT NULL,
+  at_ms INTEGER NOT NULL, recorded_at INTEGER NOT NULL);
+
+CREATE TABLE IF NOT EXISTS member_credentials( -- 会员凭据（**只存哈希**，明文不落库）
+  id INTEGER PRIMARY KEY, member_id INTEGER NOT NULL, code_hash TEXT NOT NULL,
+  created_at INTEGER NOT NULL, last_used_at INTEGER, revoked_at INTEGER);
+
+CREATE TABLE IF NOT EXISTS rate_limits(        -- 限流桶（按 IP 与按账号双维度，NFR-S-2）
+  bucket TEXT PRIMARY KEY, window_started_at INTEGER NOT NULL, hits INTEGER NOT NULL);
 """
 
 
