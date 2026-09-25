@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from html import escape
 
 import pytest
@@ -147,7 +148,12 @@ def test_site_tree_contains_every_declared_artifact(ledger, site_root):
     for path, html in build.tree.files().items():
         assert html.startswith("<!DOCTYPE html>"), path
         assert "<script" not in html, path
-        assert "http://" not in html and "https://" not in html, path
+        # 无外部请求（NFR-P-3）：不加载任何站外资源、不引第三方脚本。
+        # 订阅页会写出**我们自己那台机器**的 API 基址（绝对 URL，用户要拿它调接口），
+        # 那不是资源请求，所以只有这一页允许出现绝对 URL。
+        assert not re.search(r'(?:src|href)="https?://', html), path
+        if path != "subscribe.html":
+            assert "http://" not in html and "https://" not in html, path
 
 
 def test_navigation_is_the_same_on_every_page_and_every_link_lands(ledger):
@@ -359,3 +365,38 @@ def test_reports_with_a_removed_segment_still_render_for_the_check_layer(ledger)
     ledger.conn.commit()
     build = build_site(ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT)
     assert len(build.facts.reports[-1].content.segments) == 10
+
+
+def test_subscribe_page_shows_the_configured_plans_and_api_base(ledger):
+    """T9：订阅页把档位与价格（来自 `config`，不写死）与四个接口如实写出。"""
+    from danmu_intel.billing import pricing
+
+    publish_forms(ledger)
+    html = build_site(ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT).tree.page(
+        "subscribe.html"
+    ).html
+    assert "5.00 USDT" in html and "30 天" in html and "0.50 USDT" in html
+    assert "POST /api/orders" in html and "POST /api/claim" in html
+    assert "POST /api/verify" in html and "/api/report/" in html
+    assert "无法用来枚举会员" in html
+
+    pricing.save_billing_config(
+        ledger.conn, actor="管理员", changes={"api_base": "https://host.ts.net:8443/"}
+    )
+    with_base = build_site(
+        ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT
+    ).tree.page("subscribe.html").html
+    assert "POST https://host.ts.net:8443/api/orders" in with_base
+    assert "https://host.ts.net:8443//api" not in with_base  # 基址尾部斜杠不双写
+
+
+def test_subscribe_page_says_so_when_prices_are_not_configured(ledger):
+    from danmu_intel.billing import pricing
+
+    publish_forms(ledger)
+    pricing.save_billing_config(ledger.conn, actor="管理员", changes={"tiers": []})
+    html = build_site(ledger.conn, data_root=ledger.data_root, generated_at=GENERATED_AT).tree.page(
+        "subscribe.html"
+    ).html
+    assert "档位与价格还没配置" in html
+    assert "USDT" not in html

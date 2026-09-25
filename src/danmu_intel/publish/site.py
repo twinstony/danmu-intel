@@ -303,6 +303,10 @@ class SiteFacts:
     players: tuple[PlayerView, ...] = ()
     gray_signals: tuple[GrayView, ...] = ()
     segment_stats: dict[int, str] = field(default_factory=dict)
+    #: 订阅档位（价格与时长取自 `config`，页面只如实展示，不写死数字）
+    plans: tuple["PlanView", ...] = ()
+    #: 对外 API 基址（Tailscale Funnel 域名）；空则页面上只写路径
+    api_base: str = ""
 
     def match(self, match_id: int) -> Match:
         for match in self.matches:
@@ -319,6 +323,16 @@ class SiteFacts:
     @property
     def leagues(self) -> tuple[str, ...]:
         return tuple(sorted({match.league for match in self.matches}))
+
+
+@dataclass(frozen=True, slots=True)
+class PlanView:
+    """订阅页上的一档（T9）：价格与时长来自收款配置，页面不写死数字。"""
+
+    key: str
+    label: str
+    price: str
+    days: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -715,7 +729,24 @@ def _render_verification(facts: SiteFacts) -> str:
 
 def _render_subscribe(facts: SiteFacts) -> str:
     page_path = "subscribe.html"
-    body = """<section class="card">
+    plans = "".join(
+        f"<tr><td>{escape(plan.label)}</td><td>{escape(plan.price)}</td>"
+        f"<td>{plan.days} 天</td></tr>"
+        for plan in facts.plans
+    )
+    if plans:
+        plans_table = (
+            "<table class=\"boundary\"><tr><th>档位</th><th>价格</th><th>时长</th></tr>"
+            f"{plans}</table>"
+            "<p class=\"meta\">价格尾部带有几分钱的唯一尾数（用于区分同额订单），"
+            "以付款页面显示的金额为准。</p>"
+        )
+    else:
+        plans_table = (
+            "<p>档位与价格还没配置（后台可改），配置生效前本页不写任何数字。</p>"
+        )
+    api = escape(facts.api_base) if facts.api_base else ""
+    body = f"""<section class="card">
 <h2>免费与付费的边界</h2>
 <table class="boundary">
 <tr><th>内容</th><th>免费读者</th><th>会员</th></tr>
@@ -727,9 +758,28 @@ def _render_subscribe(facts: SiteFacts) -> str:
 <p class="meta">比赛一结束，其全部内容自动转为免费公开，不存在「已结束但仍被锁」的比赛。</p>
 </section>
 <section class="card">
-<h2>怎么拿到会员</h2>
-<p>不需要注册账号：凭既有的第三方通讯账号标识即可校验。档位与具体价格由后台配置
-（数值属开放项，配置生效前本页不写任何数字）。</p>
+<h2>档位与价格</h2>
+{plans_table}
+</section>
+<section class="card">
+<h2>怎么拿到会员（不需要注册账号）</h2>
+<ol>
+<li>选档位，填既有的通讯账号标识（Telegram @name 或 QQ 号）——<strong>不注册本站账号</strong>。</li>
+<li>页面上给出你专属的收款地址（或唯一标识）与应付金额；用你的钱包转账，系统会自动检测入账。</li>
+<li>到账即自动开通（<strong>无需等待人工</strong>）；随后按页面给出的接口领取凭据，
+凭据存在浏览器的 cookie 里，访问付费内容时自动携带。</li>
+<li>到期前会提醒；续费从原到期日顺延，宽限期内仍可访问。</li>
+</ol>
+</section>
+<section class="card">
+<h2>接口</h2>
+<ul class="rows">
+<li><code>POST {api}/api/orders</code>：下单，拿到专属收款地址/唯一标识、金额与领取令牌。</li>
+<li><code>POST {api}/api/claim</code>：凭「通讯账号 + 订单引用 + 领取令牌」领取凭据。</li>
+<li><code>POST {api}/api/verify</code>：校验凭据，返回会员状态与有效期。</li>
+<li><code>GET {api}/api/report/&lt;比赛&gt;/&lt;形态&gt;/paid</code>：凭据读取付费正文。</li>
+</ul>
+<p class="meta">接口对「账号不存在」「未开通」「已过期」返回完全相同的响应，因此无法用来枚举会员。</p>
 </section>
 <section class="card">
 <h2>付费内容怎么发</h2>
@@ -869,6 +919,7 @@ def build_site(
         )
         for match_id, kind, version, report_generated_at in published_versions(conn)
     )
+    billing = _billing_view(conn)
     facts = SiteFacts(
         generated_at=generated_at if generated_at is not None else now_ms(),
         matches=matches,
@@ -877,8 +928,36 @@ def build_site(
         players=_player_views(matches),
         gray_signals=_gray_views(conn),
         segment_stats=_segment_stats(conn),
+        plans=billing.plans,
+        api_base=billing.api_base,
     )
     return SiteBuild(tree=_build_tree(facts), facts=facts)
+
+
+@dataclass(frozen=True, slots=True)
+class _BillingView:
+    """订阅页要用的收款事实（档位 + 对外 API 基址）。"""
+
+    plans: tuple[PlanView, ...] = ()
+    api_base: str = ""
+
+
+def _billing_view(conn: sqlite3.Connection) -> _BillingView:
+    from danmu_intel.billing import pricing
+
+    config = pricing.load_billing_config(conn)
+    return _BillingView(
+        plans=tuple(
+            PlanView(
+                key=tier.key,
+                label=tier.label,
+                price=f"{pricing.format_units(tier.amount_units)} {pricing.ASSET_SYMBOL}",
+                days=tier.days,
+            )
+            for tier in config.tiers
+        ),
+        api_base=config.api_base.rstrip("/"),
+    )
 
 
 def _material(
