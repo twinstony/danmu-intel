@@ -109,3 +109,14 @@ def test_billing_save_bumps_version_too(conn):
     pricing.save_billing_config(conn, actor="管理员", changes={"grace_ms": 3_600_000})
     assert config_store.version(conn) == 1
     assert pricing.load_billing_config(conn).grace_ms == 3_600_000
+
+
+def test_bump_only_moves_the_version(conn):
+    """`bump` 只动版本号：给「存在别的表里、但同样要跨进程生效」的改动用（今天只有数据源）。"""
+    assert config_store.bump(conn, keys=("rooms",), actor="admin", ts=1_790_064_000_000).version == 1
+    assert config_store.version(conn) == 1
+    assert conn.execute("SELECT COUNT(*) AS n FROM config").fetchone()["n"] == 0, "不许顺手写 config 行"
+    latest = config_store.latest(conn)
+    assert latest is not None and latest.keys == ("rooms",) and latest.updated_by == "admin"
+    with pytest.raises(ValueError):
+        config_store.bump(conn, keys=("rooms",), actor="")
