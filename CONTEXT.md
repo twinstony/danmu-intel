@@ -60,7 +60,12 @@
 | 房间会话 | 一次采集会话（进程级），含 PID、心跳、状态 |
 | 采集监督 | 一房间一子进程的启动/监控/重拉机制（`supervisor`），含退避与重启上限 |
 | 心跳 | 子进程每 5 秒原子写的存活证据（库内 `room_sessions` 行 + `runtime/heartbeat/<platform>-<room_id>.json`） |
-| 异常事件 | 采集异常产生的待投递事件（`incident` → `notifications(state='pending')`），投递归 T11 |
+| 异常事件 | 采集异常产生的待投递事件（`incident` → `notifications(state='pending')`），投递见「投递」 |
+| 投递 | 把待投递事件经通知通道送出去（统一 5 分钟时效闸门） | `notify` / `notifier` | 发送、推送 |
+| 通知通道 | 通知的出口：QQ Bot（主）+ Telegram（备） | `ChannelSet` | 通道 |
+| 告警台账 | 同一件事的发生台账：发生几次、最后何时送出、恢复了没 | `alerts` | 告警表 |
+| 告警抑制 | 同一 `alert_key` 在冷却期内只发一次，后来的留痕不发（`suppressed`） | `alert_key` / `suppressed` | 去重、限流 |
+| 恢复通知 | 告警条件消失时发一次的通知（`<kind>.resolved`，级别 `info`） | `resolved` | 解除通知 |
 | 消息指纹 | 一条原始记录的内容指纹（`msg_hash` = `ts\|user_hash\|text`），去重键 `(platform, room_id, msg_hash)` |
 | 贡献量 | 一个直播间对某场比赛的落盘条数 / 时间跨度 / 去重后条数（`contribution`） |
 | 段 | 报告的十一分之一，固定编号 0–10，带 `kinds` 标记（`fact` / `interpretation`） |
@@ -78,6 +83,7 @@
 | 监听游标 | 「上次扫到哪」的持久化位置（一目标一行） | `chain_cursors(network, scope)` | 断点、进度 |
 | 补扫 | **不看游标**、按地址查全历史的一次扫描（与增量轮询互为兜底） | `rescan` | 重扫、回扫 |
 | 时效闸门 | 通知 5 分钟未送达即销毁的统一机制 |
+| 落盘丢包 | 收到但没完整写进 JSONL 的记录（占比 >2% 即报警） | `drop_rate_high` | 写丢失 |
 | 配置版本号 | 后台保存配置时递增，用于跨进程失效缓存 |
 | 每日盐 | 统计中用于哈希 IP+UA 的每日更换盐值（次日不可回溯；只留当天一行） |
 | 站点统计 | 自建的页面访问统计（beacon 上报 → 明细 → 日汇总）；不跨站跟踪、不含身份 | `site_stats` | 埋点、分析 |
