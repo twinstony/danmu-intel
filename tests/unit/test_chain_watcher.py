@@ -385,3 +385,34 @@ def test_run_can_skip_the_startup_rescan(conn):
         conn, [target("polygon", ADDRESS)], polygon=fake, clock=clock.clock, sleep=clock.sleep
     ).run(seconds=0, rescan_first=False)
     assert [call["from_block"] for call in fake.calls] == [0]
+
+
+def test_recovery_from_rate_limit_is_delivered_as_a_recovery_notification(conn):
+    """「坏了」与「好了」都要有人知道：投递过的告警恢复时发一条恢复通知（ADR-0010）。"""
+    from conftest import FakeChannel
+    from danmu_intel.notify import ChannelSet, deliver_once
+
+    watcher, _ = polygon_watcher(conn, script=[RateLimited("限速"), []])
+    qq = FakeChannel("qq")
+    watcher.poll()
+    deliver_once(conn, channels=ChannelSet(primary=qq), now=BASE_MS + 1000)  # 告警真的送出去了
+    assert [item.kind for item in recent(conn, limit=5)] == ["chain_rate_limited"]
+
+    watcher.poll()  # 供应商又通了 → 台账转 resolved + 恢复通知
+
+    delivered = recent(conn, limit=5)
+    assert delivered[0].kind == "chain_rate_limited.resolved"
+    assert delivered[0].severity == "info"
+    result = deliver_once(conn, channels=ChannelSet(primary=qq), now=BASE_MS + 2000)
+    assert [item.state for item in result.outcomes] == ["delivered"]
+    assert "（已恢复）" in qq.texts[-1]
+    assert "供应商 polygonscan" in qq.texts[-1]
+
+
+def test_failure_that_was_never_delivered_has_no_recovery_notice(conn):
+    """没送到过的告警不补一条"恢复"：运维没收到过"坏了"，就不必收到"好了"。"""
+    watcher, _ = polygon_watcher(conn, script=[RateLimited("限速"), []])
+    watcher.poll()  # 告警入库但**没有投递**（台账还没 firing）
+    watcher.poll()  # 供应商又通了
+
+    assert [item.kind for item in recent(conn, limit=5)] == ["chain_rate_limited"]

@@ -225,3 +225,46 @@ def test_assets_are_public_constants_and_match_per_chain(conn):
     assert not pricing.is_our_asset("solana", pricing.USDT["solana"].lower())
     with pytest.raises(pricing.BillingConfigError, match="未知的收款网络"):
         pricing.asset_for("base")
+
+
+def test_sweep_keeps_going_and_reports_the_failures(conn, monkeypatch):
+    """批处理失败不静默（设计 §15 #10）：一个会员出错不拖垮整批，失败名单进通知。"""
+    from danmu_intel.common.notifications import recent
+
+    first = members.get_or_create_member(conn, platform="qq", username="12345678", tier="trial", now=BASE_MS)
+    second = members.get_or_create_member(conn, platform="telegram", username="@tonychan", tier="trial", now=BASE_MS)
+    members.grant(conn, member_id=first.id, tier="trial", tx_ref="0x1", now=BASE_MS)
+    members.grant(conn, member_id=second.id, tier="trial", tx_ref="0x2", now=BASE_MS)
+    expires_at = BASE_MS + 3 * DAY
+
+    original = members.get_member
+
+    def flaky(connection, member_id):
+        if member_id == second.id:
+            raise RuntimeError("会员行读不出来")
+        return original(connection, member_id)
+
+    monkeypatch.setattr(members, "get_member", flaky)
+
+    changed = members.sweep(conn, now=expires_at + 1)
+
+    assert [member.id for member in changed] == [first.id], "坏掉的那个不拖垮整批"
+    [item] = recent(conn, limit=5)
+    assert item.kind == members.MEMBER_SWEEP_FAILED
+    assert item.severity == "warning"
+    assert item.payload == {
+        "failed": 1,
+        "changed": 1,
+        "members": [{"member_id": second.id, "to_status": "grace", "error": "会员行读不出来"}],
+    }
+
+
+def test_sweep_reports_nothing_when_all_members_succeed(conn):
+    from danmu_intel.common.notifications import recent
+
+    member = members.get_or_create_member(conn, platform="qq", username="12345678", tier="trial", now=BASE_MS)
+    members.grant(conn, member_id=member.id, tier="trial", tx_ref="0x1", now=BASE_MS)
+
+    members.sweep(conn, now=BASE_MS + 3 * DAY + 1)
+
+    assert recent(conn) == []

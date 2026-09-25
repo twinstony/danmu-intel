@@ -5,7 +5,7 @@
 1. 落盘（append-only JSONL）+ 封存（`danmu_segments`）；
 2. 每 5 秒写心跳（`room_sessions` 行 + `runtime/heartbeat/<platform>-<room>.json`），
    状态在 `connecting → running → stalled/no_stream → exited` 之间走；
-3. 异常不静默（`collect/incidents.py`）：`no_stream` / `stalled` / `disk_low`。
+3. 异常不静默（`collect/incidents.py`）：`no_stream` / `stalled` / `disk_low` / `drop_rate_high`。
 
 进程级监督（一房间一子进程、重启退避、重启上限）在 `collect/supervisor.py`；
 它把「第几次重启 + 已累计重连数」用环境变量接力给本进程。
@@ -38,6 +38,8 @@ from danmu_intel.collect.heartbeat import (
 )
 from danmu_intel.collect.incidents import (
     DISK_LOW,
+    DROP_RATE_HIGH,
+    DROP_RATE_MAX,
     NO_STREAM,
     STALLED,
     SessionIncidents,
@@ -189,6 +191,7 @@ class SessionStats:
     last_msg_at: int | None = None
     reconnects: int = 0
     severity: str = "info"
+    drop_count: int = 0  # 收到但没完整落盘的条数（设计 §15 #3 的分子）
 
 
 class SessionRuntime:
@@ -233,6 +236,10 @@ class SessionRuntime:
         self.stats.last_msg_at = event.ts
         self.stats.state = "running"
 
+    def note_drop(self) -> None:
+        """一条没完整落盘（短写 / 写失败）—— 累计然后由 `check_drops` 判是否超阈。"""
+        self.stats.drop_count += 1
+
     def note_reconnect(self, reason: str) -> None:
         """重连回调：累计 `reconnects`、标 `stalled`，静默断流立即报事件。"""
         self.stats.reconnects += 1
@@ -263,6 +270,29 @@ class SessionRuntime:
             DISK_LOW,
             "critical",
             {"free_bytes": free_bytes(self.data_root), "minimum_bytes": DISK_FREE_MIN_BYTES},
+        )
+        return True
+
+    def check_drops(self) -> bool:
+        """落盘丢包率超阈 → `drop_rate_high`（设计 §15 #3：`drop/messages > 2%`）。
+
+        分母是**收到的条数**（`msg_count`，含没写成功的那几条），与设计原文一致；
+        一条都没收到时不判定（没有可比的分母）。
+        """
+        if not self.stats.msg_count:
+            return False
+        ratio = self.stats.drop_count / self.stats.msg_count
+        if ratio <= DROP_RATE_MAX:
+            return False
+        self._report(
+            DROP_RATE_HIGH,
+            "warning",
+            {
+                "drop_count": self.stats.drop_count,
+                "msg_count": self.stats.msg_count,
+                "ratio": round(ratio, 4),
+                "threshold": DROP_RATE_MAX,
+            },
         )
         return True
 
@@ -309,10 +339,12 @@ class SessionRuntime:
             await asyncio.sleep(self.interval)
             self.check_first_message()
             self.check_disk()
+            self.check_drops()
             self.publish()
 
     def finish(self, state: str) -> None:
         """收工：落下最终状态（含 `exited`）并再发一次心跳。"""
+        self.check_drops()
         self.stats.state = state
         self.conn.execute(
             "UPDATE room_sessions SET ended_at=?, state=?, last_msg_at=?, reconnects=?, severity=? WHERE id=?",
@@ -406,7 +438,8 @@ async def run_session(
                 if appender is None:
                     appender = JsonlAppender(path)
                     touched[path] = appender
-                appender.append(event)
+                if not appender.append(event):
+                    runtime.note_drop()
                 count += 1
                 runtime.note_message(event)
         except Exception:

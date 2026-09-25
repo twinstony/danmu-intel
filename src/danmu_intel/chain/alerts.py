@@ -11,6 +11,10 @@
 **绝不静默**：需求 FR-C6-11 要的正是"检测能力受限时报警，而不是静默漏检"——这也是
 本模块存在的唯一理由。严重级别写死在 `SEVERITIES` 里：设计 §15 的第 6 行把三种情况
 一律定为「高」，级别不由调用方临时决定，免得同一种故障在不同调用点报出不同的档。
+
+**恢复也算事实**：供应商又通了 / 额度回落 → `AlertGate.forget` 把 T11 的告警台账
+（`alerts` 表）转成 `resolved` 并写一条 `<kind>.resolved` 恢复通知（ADR-0010）。
+"好了"与"坏了"一样要有人知道，否则运维只能看到一半的故事。
 """
 
 from __future__ import annotations
@@ -18,6 +22,7 @@ from __future__ import annotations
 import sqlite3
 
 from danmu_intel.common.notifications import emit
+from danmu_intel.notify import suppression
 
 QUOTA_HIGH = "chain_quota_high"
 RATE_LIMITED = "chain_rate_limited"
@@ -79,5 +84,11 @@ class AlertGate:
         return True
 
     def forget(self, kind: str, *, provider: str) -> None:
-        """忘掉某类告警的去重记录（额度回落/恢复正常后再出问题要能再报）。"""
+        """某类告警好了：忘掉本进程的去重记录，并把 T11 的告警台账转 `resolved`。
+
+        两件事都得做：去重记录只管本进程（重启后再报一次恰恰有用），而 `resolved`
+        与恢复通知是跨进程的事实（ADR-0010「恢复时发送一次恢复通知」）。真的恢复
+        （而不是又一轮"重新看现状"）才发恢复通知 —— 台账不在 `firing` 时它什么都不做。
+        """
         self._seen = {key for key in self._seen if not (key[0] == kind and key[1] == provider)}
+        suppression.resolve(self._conn, kind, identity={"provider": provider})

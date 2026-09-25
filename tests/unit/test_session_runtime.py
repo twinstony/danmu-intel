@@ -12,7 +12,7 @@ from danmu_intel.collect import heartbeat as heartbeat_module
 from danmu_intel.collect import runner
 from danmu_intel.collect.adapter import Probe, RoomKey
 from danmu_intel.collect.heartbeat import Supervision, read_heartbeat, supervision_env
-from danmu_intel.collect.incidents import DISK_LOW, NO_STREAM, STALLED, recent
+from danmu_intel.collect.incidents import DISK_LOW, DROP_RATE_HIGH, NO_STREAM, STALLED, recent
 from danmu_intel.collect.runner import run_session
 from danmu_intel.common import paths
 from danmu_intel.common.db import open_db
@@ -260,3 +260,67 @@ def test_session_writes_under_the_given_data_root_not_the_env(tmp_path, monkeypa
         )
     assert result.segments[0].rel_path.startswith("raw/huya/")
     assert (elsewhere / result.segments[0].rel_path).exists()
+
+
+def _flaky_appender(drops: int):
+    """真的写盘，但前 `drops` 次谎报"没写进去"（模拟短写 / 写失败）。"""
+    original = runner.JsonlAppender.append
+    remaining = {"drops": drops}
+
+    def append(self, event):
+        written = original(self, event)
+        if remaining["drops"] > 0:
+            remaining["drops"] -= 1
+            return False
+        return written
+
+    return append
+
+
+def test_drop_rate_over_threshold_reports_once(data_root, monkeypatch):
+    """落盘丢包率 > 2% → `drop_rate_high`（设计 §15 #3），分母是收到的条数。"""
+    monkeypatch.setattr(runner.JsonlAppender, "append", _flaky_appender(3))
+    with session_db() as conn:
+        result = asyncio.run(
+            run_session(
+                ROOM,
+                adapter=ScriptedAdapter(events(100)),
+                match_id=21,
+                seconds=0.5,
+                conn=conn,
+                heartbeat_interval=0.02,
+            )
+        )
+    assert result.msg_count == 100
+    assert result.incidents == [DROP_RATE_HIGH]
+
+    conn = open_db(paths.db_path())
+    try:
+        [item] = recent(conn, match_id=21)
+        assert item.severity == "warning"
+        assert item.payload["drop_count"] == 3 and item.payload["msg_count"] == 100
+        assert item.payload["ratio"] == 0.03 and item.payload["threshold"] == 0.02
+        assert item.payload["platform"] == "huya" and item.payload["room_id"] == "660000"
+    finally:
+        conn.close()
+
+
+def test_drop_rate_at_or_below_threshold_stays_quiet(data_root, monkeypatch):
+    monkeypatch.setattr(runner.JsonlAppender, "append", _flaky_appender(2))  # 2/100 = 2%
+    with session_db() as conn:
+        result = asyncio.run(
+            run_session(
+                ROOM,
+                adapter=ScriptedAdapter(events(100)),
+                match_id=22,
+                seconds=0.5,
+                conn=conn,
+                heartbeat_interval=0.02,
+            )
+        )
+    assert result.incidents == []
+    conn = open_db(paths.db_path())
+    try:
+        assert recent(conn, match_id=22) == []
+    finally:
+        conn.close()

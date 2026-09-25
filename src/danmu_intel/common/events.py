@@ -135,8 +135,10 @@ class JsonlAppender:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._fd = os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o644)
 
-    def append(self, event: DanmuEvent) -> None:
-        os.write(self._fd, (event.to_line() + "\n").encode("utf-8"))
+    def append(self, event: DanmuEvent) -> bool:
+        """写一条；返回是否**完整**写入（短写就是丢了一条 —— 不静默）。"""
+        data = (event.to_line() + "\n").encode("utf-8")
+        return os.write(self._fd, data) == len(data)
 
     def close(self) -> None:
         if self._fd >= 0:

@@ -8,7 +8,23 @@ from __future__ import annotations
 
 import pytest
 
-from danmu_intel.common.notifications import SEVERITY_ORDER, emit, recent
+from danmu_intel.common.notifications import (
+    DELIVERED,
+    DROPPED_EXPIRED,
+    FAILED,
+    SEVERITY_ORDER,
+    SUPPRESSED,
+    counts,
+    emit,
+    get,
+    mark_delivered,
+    mark_dropped_expired,
+    mark_failed,
+    mark_suppressed,
+    pending,
+    recent,
+    record_attempt,
+)
 
 from conftest import BASE_TS
 
@@ -59,3 +75,50 @@ def test_recent_exposes_payload_and_state(conn):
     assert item.payload["reason"] == "连续 3 次调用失败"
     assert item.state == "pending"
     assert item.id > 0 and item.created_at > 0
+    assert item.channel is None and item.delivered_at is None and item.attempts == 0
+
+
+def test_pending_is_oldest_first_and_excludes_terminal_states(conn):
+    first = emit(conn, LLM_KIND, severity="warning", payload={"match_id": 1}, timestamp=1)
+    second = emit(conn, COLLECT_KIND, severity="warning", payload={"match_id": 2}, timestamp=2)
+    emit(conn, LLM_KIND, severity="warning", payload={"match_id": 3}, timestamp=3)
+
+    assert [item.id for item in pending(conn)] == [first, second, 3]
+    assert [item.id for item in pending(conn, limit=2)] == [first, second]
+
+    mark_delivered(conn, first, channel="qq", at=BASE_TS)
+    mark_suppressed(conn, second)
+    assert [item.id for item in pending(conn)] == [3]
+
+
+def test_state_transitions_are_recorded(conn):
+    delivered_id = emit(conn, LLM_KIND, severity="warning", payload={}, timestamp=BASE_TS)
+    assert record_attempt(conn, delivered_id) == 1
+    assert record_attempt(conn, delivered_id) == 2
+    item = mark_delivered(conn, delivered_id, channel="qq+telegram", at=BASE_TS + 5)
+    assert (item.state, item.channel, item.delivered_at, item.attempts) == (DELIVERED, "qq+telegram", BASE_TS + 5, 2)
+
+    suppressed_id = emit(conn, LLM_KIND, severity="warning", payload={}, timestamp=BASE_TS)
+    assert mark_suppressed(conn, suppressed_id).state == SUPPRESSED
+
+    expired_id = emit(conn, LLM_KIND, severity="warning", payload={}, timestamp=BASE_TS)
+    assert mark_dropped_expired(conn, expired_id).state == DROPPED_EXPIRED
+
+    failed_id = emit(conn, LLM_KIND, severity="warning", payload={}, timestamp=BASE_TS)
+    assert mark_failed(conn, failed_id).state == FAILED
+
+    assert all(item.state != "pending" for item in recent(conn))
+
+
+def test_get_and_state_writes_reject_unknown_id(conn):
+    assert get(conn, 42) is None
+    with pytest.raises(LookupError, match="通知不存在"):
+        mark_failed(conn, 42)
+
+
+def test_counts_groups_by_state(conn):
+    assert counts(conn) == {}
+    first = emit(conn, LLM_KIND, severity="warning", payload={}, timestamp=BASE_TS)
+    emit(conn, LLM_KIND, severity="warning", payload={}, timestamp=BASE_TS)
+    mark_delivered(conn, first, channel="qq", at=BASE_TS)
+    assert counts(conn) == {"pending": 1, "delivered": 1}

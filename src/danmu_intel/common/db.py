@@ -16,8 +16,10 @@ T9 加 `members` / `orders` / `order_payments` / `member_credentials` / `rate_li
 T10 加 `stats_events`（站点统计明细：只有每日盐下的访客哈希，**没有 IP / UA / 身份**）、
 `stats_daily`（日汇总：明细 90 天到期后唯一留存的口径）与 `stats_salt`（每日盐，只留当天一行）。
 
-T12 加 `config_version`（配置版本号，单行：每次保存配置递增一级 —— 采集子进程据此按新配置
-重起，NFR-T-4「配置改动 1 分钟内生效」的跨进程那一半）。
+T11 加 `alerts`（告警台账：同 `alert_key` 的冷却期抑制与恢复）。
+
+T12 加 `config_version`（配置版本号，单行：每次保存配置或数据源登记递增一级 —— 采集子进程
+据此按新配置重起、并按登记表增/停房间，NFR-T-4「配置改动 1 分钟内生效」的跨进程那一半）。
 
 新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
 开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
@@ -96,8 +98,15 @@ CREATE TABLE IF NOT EXISTS releases(          -- 发布批次（一次原子发�
 CREATE TABLE IF NOT EXISTS notifications(      -- 待投递事件（采集异常事件的出口）
   id INTEGER PRIMARY KEY, kind TEXT NOT NULL, severity TEXT NOT NULL,
   payload_json TEXT NOT NULL, created_at INTEGER NOT NULL,
-  state TEXT NOT NULL,           -- pending|delivered|dropped_expired|failed
+  state TEXT NOT NULL,           -- pending|delivered|suppressed|dropped_expired|failed
   delivered_at INTEGER, channel TEXT, attempts INTEGER NOT NULL DEFAULT 0);
+
+CREATE TABLE IF NOT EXISTS alerts(             -- 告警台账（同 alert_key 的抑制与恢复）
+  id INTEGER PRIMARY KEY, alert_key TEXT NOT NULL UNIQUE, kind TEXT NOT NULL,
+  first_seen INTEGER NOT NULL, last_seen INTEGER NOT NULL,
+  count INTEGER NOT NULL DEFAULT 1, state TEXT NOT NULL,  -- firing|resolved
+  last_sent_at INTEGER,          -- 最后一次真正送达的时刻（冷却期的钟）
+  resolved_at INTEGER);
 
 CREATE TABLE IF NOT EXISTS gray_signals(       -- 灰信号（风险提示，不含指控）
   id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL,
