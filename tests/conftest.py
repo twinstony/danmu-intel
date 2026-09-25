@@ -117,7 +117,7 @@ def ledger(data_root, conn) -> Ledger:
         state="ended",
         official_result={"score": "2:0"},
     )
-    _index_segment(conn, match_id=match_id, rel_path=REL_PATH, digest=digest, events=events)
+    index_segment(conn, match_id=match_id, rel_path=REL_PATH, digest=digest, events=events)
 
     game1 = (BASE_TS, BASE_TS + 300_000)
     game2 = (BASE_TS + 300_000, BASE_TS + 360_000)
@@ -135,26 +135,38 @@ def ledger(data_root, conn) -> Ledger:
     )
 
 
-def _index_segment(
-    conn, *, match_id: int, rel_path: str, digest: str, events: list[DanmuEvent]
+def index_segment(
+    conn,
+    *,
+    match_id: int,
+    rel_path: str,
+    digest: str,
+    events: list[DanmuEvent],
+    room_id: str = ROOM_ID,
 ) -> None:
-    """建房间行 + 采集会话行 + 落盘文件索引（测试里的最小取证链）。"""
+    """建房间行 + 采集会话行 + 落盘文件索引（测试里的最小取证链）。
+
+    `room_id` 可换：一场比赛可能不止一个房间（T13 的数据生命周期测试会落两场比赛）。
+    """
     conn.execute(
-        "INSERT INTO rooms(platform, room_id, url, streamer, discovered_by, is_live, last_seen_at) "
-        "VALUES('huya', ?, 'https://www.huya.com/660000', '样例主播', 'manual', 1, ?)",
-        (ROOM_ID, BASE_TS),
+        "INSERT OR IGNORE INTO rooms(platform, room_id, url, streamer, discovered_by, is_live, last_seen_at) "
+        "VALUES('huya', ?, ?, '样例主播', 'manual', 1, ?)",
+        (room_id, f"https://www.huya.com/{room_id}", BASE_TS),
     )
-    room_row_id = conn.execute("SELECT id FROM rooms ORDER BY id DESC").fetchone()["id"]
+    room_row_id = conn.execute(
+        "SELECT id FROM rooms WHERE platform='huya' AND room_id=?", (room_id,)
+    ).fetchone()["id"]
+    last_ts = events[-1].ts if events else BASE_TS
     conn.execute(
         "INSERT INTO room_sessions(room_id, match_id, pid, started_at, ended_at, state, last_msg_at) "
         "VALUES(?, ?, 1, ?, ?, 'exited', ?)",
-        (room_row_id, match_id, BASE_TS, events[-1].ts, events[-1].ts),
+        (room_row_id, match_id, BASE_TS, last_ts, last_ts),
     )
     session_id = conn.execute("SELECT id FROM room_sessions ORDER BY id DESC").fetchone()["id"]
     conn.execute(
         "INSERT INTO danmu_segments(room_session_id, rel_path, sha256, first_ts, last_ts, msg_count, sealed_at) "
         "VALUES(?, ?, ?, ?, ?, ?, ?)",
-        (session_id, rel_path, digest, events[0].ts, events[-1].ts, len(events), BASE_TS + 400_000),
+        (session_id, rel_path, digest, events[0].ts if events else None, last_ts, len(events), BASE_TS + 400_000),
     )
     conn.commit()
 
@@ -199,7 +211,7 @@ def three_game_ledger(data_root, conn) -> ThreeGameLedger:
     match_id = create_match(
         conn, league="LPL", team_a="iG", team_b="LNG", state="live"
     )
-    _index_segment(
+    index_segment(
         conn, match_id=match_id, rel_path=THREE_GAME_REL_PATH, digest=digest, events=events
     )
     for no, (start, end) in windows.items():

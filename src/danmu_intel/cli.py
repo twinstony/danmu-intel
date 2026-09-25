@@ -70,7 +70,8 @@ import json
 import logging
 import sys
 import time
-from datetime import datetime
+from datetime import date, datetime
+from pathlib import Path
 
 from danmu_intel.common import paths
 from danmu_intel.common.audit import record as audit_record
@@ -1147,6 +1148,102 @@ def _rate(numerator: int, denominator: int) -> str:
     return f"{numerator / denominator * 100:.1f}%"
 
 
+def _cmd_archive(args: argparse.Namespace) -> int:
+    """原始弹幕归档：到期文件压缩迁归档根（NAS 挂载点）；`--verify` 复核；`--retrieve` 取回。
+
+    长期数据（切片/统计/报告/订单/会员/审计）不归本命令管 —— 归档只处理原始弹幕
+    （需求 §7.10 / AC-17）；统计明细 90 天 → `stats_daily` 走 `site-stats --prune`。
+    """
+    from danmu_intel import archive as archive_module
+
+    conn = open_db()
+    try:
+        if args.retrieve:
+            return _archive_retrieve(conn, args, archive_module)
+        if args.verify:
+            return _archive_verify(conn, archive_module)
+        cutoff = (
+            date.fromisoformat(args.cutoff)
+            if args.cutoff
+            else archive_module.cutoff_date(months=args.months)
+        )
+        if args.dry_run:
+            plan = archive_module.plan(conn, cutoff=cutoff, data_root=paths.data_dir())
+            print(
+                f"试运行：归档根 {paths.archive_dir()}｜保留期截止 {cutoff.isoformat()}"
+                f"（在线保留 {args.months} 个月）：到期 {len(plan.due)} 个文件（未压缩、未移动）"
+            )
+            _print_archive_paths((segment.rel_path for segment in plan.due), limit=args.limit)
+            _print_archive_anomalies(plan.anomalies)
+            return 1 if plan.anomalies else 0
+        result = archive_module.run(
+            conn,
+            actor=args.actor,
+            cutoff=cutoff,
+            data_root=paths.data_dir(),
+            allow_same_disk=args.allow_same_disk,
+        )
+        print(result.summary())
+        if result.archived and not result.anomalies:
+            print(
+                f"  索引行已改指向归档件（`rel_path` + `archived_at` {result.archived_at}）；"
+                "操作者与范围进了 audit_log 的 archive.run"
+            )
+        _print_archive_anomalies(result.anomalies)
+        return 1 if result.anomalies else 0
+    finally:
+        conn.close()
+
+
+def _archive_verify(conn, archive_module) -> int:
+    problems = archive_module.verify(conn, data_root=paths.data_dir())
+    total = conn.execute(
+        "SELECT COUNT(*) AS n FROM danmu_segments WHERE archived_at IS NOT NULL"
+    ).fetchone()["n"]
+    print(f"归档件复核：{total} 个｜归档根 {paths.archive_dir()}")
+    if problems:
+        _print_archive_anomalies(problems)
+        return 1
+    print("  全部通过：文件在、归档件自身摘要一致、解压后内容与封存摘要一致（可核验）")
+    return 0
+
+
+def _archive_retrieve(conn, args: argparse.Namespace, archive_module) -> int:
+    try:
+        path, content = archive_module.retrieve(conn, args.retrieve, data_root=paths.data_dir())
+    except LookupError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+    if not args.out:
+        sys.stdout.write(content.decode("utf-8"))
+        print(f"（取回自 {path}，{len(content)} 字节，内容摘要与封存值一致）", file=sys.stderr)
+        return 0
+    target = Path(args.out).expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(content)
+    print(f"已取回 {args.retrieve} → {target}（{len(content)} 字节，内容摘要与封存值一致）")
+    return 0
+
+
+def _print_archive_paths(rel_paths, *, limit: int) -> None:
+    listed = list(rel_paths)
+    for rel_path in listed[:limit]:
+        print(f"  到期｜{rel_path}")
+    if len(listed) > limit:
+        print(f"  ……还有 {len(listed) - limit} 个（--limit 调大看全）")
+
+
+def _print_archive_anomalies(anomalies) -> None:
+    for item in anomalies:
+        print(f"异常｜{item}", file=sys.stderr)
+    if anomalies:
+        print(
+            f"{len(anomalies)} 项需要人看一眼（未索引的超期文件 / 缺失 / 摘要对不上）："
+            "归档不静默处理它们，先补齐索引或人工处置",
+            file=sys.stderr,
+        )
+
+
 def _cmd_site_stats(args: argparse.Namespace) -> int:
     """站点统计：某天的访问量 / 付费页人数 / 下单转化 / 留资数（AC-9）；--prune 做 90 天保留。"""
     from danmu_intel.site_stats import daily
@@ -1508,6 +1605,30 @@ def build_parser() -> argparse.ArgumentParser:
     site_stats.add_argument("--retention-days", type=int, default=90, help="明细保留天数（默认 90）")
     site_stats.add_argument("--limit", type=int, default=30, help="列出的「最近有数据的日期」条数")
     site_stats.set_defaults(func=_cmd_site_stats)
+
+    archive_cmd = sub.add_parser(
+        "archive",
+        help="原始弹幕归档：6 个月 → 压缩 .jsonl.zst 迁归档根（NAS 挂载点），索引行改指向归档件",
+    )
+    archive_cmd.add_argument("--dry-run", action="store_true", help="只列出到期文件，不压缩、不移动")
+    archive_cmd.add_argument(
+        "--verify", action="store_true",
+        help="复核全部归档件：文件在 + 归档件自身摘要一致 + 解压后内容与封存摘要一致",
+    )
+    archive_cmd.add_argument(
+        "--retrieve", default=None, metavar="REL_PATH",
+        help="取回一份证据（在线地址或归档地址都认），校验封存摘要后输出未压缩内容",
+    )
+    archive_cmd.add_argument("--out", default=None, help="取回时写到文件（缺省写标准输出）")
+    archive_cmd.add_argument("--months", type=int, default=6, help="在线保留月数（缺省 6，自采集之日算起）")
+    archive_cmd.add_argument("--cutoff", default=None, help="保留期截止日 YYYY-MM-DD（缺省 = 今天回推 --months 个月）")
+    archive_cmd.add_argument(
+        "--allow-same-disk", action="store_true",
+        help="归档根与数据根同一磁盘时也继续（本机演练/测试；真实归档要求 NAS 挂载点）",
+    )
+    archive_cmd.add_argument("--limit", type=int, default=20, help="试运行时列出的到期文件条数")
+    archive_cmd.add_argument("--actor", default="归档器", help="操作者（进审计）")
+    archive_cmd.set_defaults(func=_cmd_archive)
 
     chain_usage = sub.add_parser("chain-usage", help="供应商额度：当日/当月用量、上限、游标")
     chain_usage.set_defaults(func=_cmd_chain_usage)

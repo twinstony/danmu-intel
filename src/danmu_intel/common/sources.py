@@ -2,15 +2,18 @@
 
 每项事实都带来源：**文件路径 + 行范围 + SHA256**。哈希取该行范围（含首尾行、
 含行尾换行）的原始字节，因此事后可独立复核「这一段证据有没有被改过」。
+
+归档（T13 / ADR-0021）不改这套语义：文件位置由 `common/evidence.py` 解析 ——
+引用里冻结的是**生成那一刻的地址**，证据归档后靠在线 ↔ 归档两个地址的互换找到
+归档件，再解压后取行范围摘要，因此同一个引用的 SHA256 在归档前后**都对得上**。
 """
 
 from __future__ import annotations
 
-import hashlib
 from dataclasses import dataclass
 from pathlib import Path
 
-from danmu_intel.common import paths
+from danmu_intel.common import evidence
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,26 +42,25 @@ class SourceRef:
 
 
 def resolve(ref: SourceRef, *, data_root: Path | None = None) -> Path:
-    return (data_root or paths.data_dir()) / ref.rel_path
+    """引用对应的证据文件：在线件不在就看归档件（归档件解压后即原始内容）。"""
+    return evidence.locate(ref.rel_path, data_root=data_root)
 
 
 def compute_digest(path: Path, line_start: int, line_end: int) -> str:
     """对 `[line_start, line_end]` 行（含首尾）的原始字节取 SHA256。"""
-    if line_start < 1 or line_end < line_start:
-        raise ValueError(f"非法行范围：{line_start}-{line_end}")
-    lines = path.read_bytes().splitlines(keepends=True)
-    if line_end > len(lines):
-        raise ValueError(f"行范围超出文件：{line_end} > {len(lines)}")
-    return hashlib.sha256(b"".join(lines[line_start - 1 : line_end])).hexdigest()
+    return evidence.line_range_sha256(path, line_start, line_end)
 
 
 def file_digest(path: Path) -> str:
-    """整文件 SHA256 —— 与 `danmu_segments.sha256`（采集时封存的摘要）同口径。"""
-    return hashlib.sha256(path.read_bytes()).hexdigest()
+    """整文件 SHA256 —— 与 `danmu_segments.sha256`（采集时封存的摘要）同口径。
+
+    归档件先解压再取摘要：封存值记的是**内容**，不是压缩后的字节。
+    """
+    return evidence.content_sha256(path)
 
 
 def make_ref(rel_path: str, line_start: int, line_end: int, *, data_root: Path | None = None) -> SourceRef:
-    path = (data_root or paths.data_dir()) / rel_path
+    path = evidence.locate(rel_path, data_root=data_root)
     return SourceRef(
         rel_path=rel_path,
         line_start=line_start,
@@ -68,7 +70,7 @@ def make_ref(rel_path: str, line_start: int, line_end: int, *, data_root: Path |
 
 
 def verify(ref: SourceRef, *, data_root: Path | None = None) -> bool:
-    """复核来源：文件存在、行范围可读、SHA256 一致。"""
+    """复核来源：文件存在（在线或归档件）、行范围可读、SHA256 一致。"""
     try:
         return compute_digest(resolve(ref, data_root=data_root), ref.line_start, ref.line_end) == ref.sha256
     except (OSError, ValueError):
@@ -84,6 +86,15 @@ def merge_line_numbers(line_numbers: list[int]) -> list[tuple[int, int]]:
         else:
             spans.append((number, number))
     return spans
+
+
+def evidence_key(rel_path: str) -> str:
+    """同一份证据的**规范地址**（在线那颗）：`seals` 与引用都按它对齐。
+
+    归档把 `danmu_segments.rel_path` 改成了归档件地址（ADR-0002），而报告里冻结的
+    是在线地址；两侧都用这个函数归一，封存摘要的比对才不至于悄悄跳过。
+    """
+    return evidence.online_rel_path(rel_path)
 
 
 def refs_for_lines(rel_path: str, line_numbers: list[int], *, data_root: Path | None = None) -> list[SourceRef]:

@@ -46,7 +46,7 @@ from danmu_intel.collect.incidents import (
     worst,
 )
 from danmu_intel.common import db as db_module
-from danmu_intel.common import paths
+from danmu_intel.common import evidence, paths
 from danmu_intel.common.events import DanmuEvent, JsonlAppender, iter_events
 
 logger = logging.getLogger(__name__)
@@ -486,10 +486,14 @@ def match_segment_paths(conn: sqlite3.Connection, match_id: int) -> list[str]:
 def read_raw_events(
     rel_paths: list[str], *, data_root: Path | None = None
 ) -> list[tuple[str, int, DanmuEvent]]:
-    """按落盘顺序读回原始记录，附带 `(rel_path, 行号)` 以便溯源。"""
+    """按落盘顺序读回原始记录，附带 `(rel_path, 行号)` 以便溯源。
+
+    归档件（`.jsonl.zst`）同样读得回：索引里的 `rel_path` 归档后指向归档件，
+    重算统计与贡献量因此不受归档影响（AC-13 / AC-17）。
+    """
     root = data_root or paths.data_dir()
     collected: list[tuple[str, int, DanmuEvent]] = []
     for rel_path in rel_paths:
-        for line_no, event in iter_events(root / rel_path):
+        for line_no, event in iter_events(evidence.locate(rel_path, data_root=root)):
             collected.append((rel_path, line_no, event))
     return collected

@@ -21,8 +21,13 @@ T11 加 `alerts`（告警台账：同 `alert_key` 的冷却期抑制与恢复）
 T12 加 `config_version`（配置版本号，单行：每次保存配置或数据源登记递增一级 —— 采集子进程
 据此按新配置重起、并按登记表增/停房间，NFR-T-4「配置改动 1 分钟内生效」的跨进程那一半）。
 
-新增/改名列一律不做迁移（AGENTS.md 禁兼容层）：旧数据目录里的库不会被自动升级，
-开发机上删掉它重建即可（原始 JSONL 是账本，库只是索引）。
+T13 给 `danmu_segments` 加归档两列（`archived_at` / `archive_sha256`，`rel_path` 归档后改指向
+归档件）：原始弹幕 6 个月 → `.jsonl.zst` 迁归档根（NAS 挂载点），索引行保留（ADR-0021）。
+
+**已有数据目录里的库就地补齐新增列**（`ADDED_COLUMNS`）：`CREATE TABLE IF NOT EXISTS`
+对已存在的表不补列，而在仓库外的旧库上少一列就是「每次归档都裸崩、还无过渡路径」。
+补列与建表同一个口径 —— `open_db()` 幂等执行，不动任何既有行（旧库不删、不重建：
+原始 JSONL 是账本，索引行一删，封存摘要与报告的溯源就补不回来了）。
 """
 
 from __future__ import annotations
@@ -58,8 +63,11 @@ CREATE TABLE IF NOT EXISTS room_sessions(      -- 一次采集会话（进程级
 
 CREATE TABLE IF NOT EXISTS danmu_segments(     -- 落盘文件索引（证据链）
   id INTEGER PRIMARY KEY, room_session_id INTEGER NOT NULL,
-  rel_path TEXT NOT NULL UNIQUE, sha256 TEXT NOT NULL,
-  first_ts INTEGER, last_ts INTEGER, msg_count INTEGER NOT NULL, sealed_at INTEGER);
+  rel_path TEXT NOT NULL UNIQUE,  -- 证据**当前在哪**：在线 = raw/…jsonl，归档后 = archive/…jsonl.zst
+  sha256 TEXT NOT NULL,           -- **内容**摘要（未压缩字节），归档前后不变（封存值）
+  first_ts INTEGER, last_ts INTEGER, msg_count INTEGER NOT NULL, sealed_at INTEGER,
+  archived_at INTEGER,            -- 归档时刻（NULL = 仍在线；同一次归档同一时刻，按它可查这次的范围）
+  archive_sha256 TEXT);           -- 归档件（.jsonl.zst）自身字节的摘要（查文件有没有损坏/被换掉）
 
 CREATE TABLE IF NOT EXISTS slices(             -- 小局切片（边界可复核）
   id INTEGER PRIMARY KEY, match_id INTEGER NOT NULL, game_no INTEGER NOT NULL,
@@ -213,10 +221,26 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     return conn
 
 
+# 建表之后才加的列：`CREATE TABLE IF NOT EXISTS` 对**已存在**的表不补列。
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("danmu_segments", "archived_at", "INTEGER"),   # 归档时刻（T13）
+    ("danmu_segments", "archive_sha256", "TEXT"),   # 归档件自身字节的摘要（T13）
+)
+
+
 def init_db(conn: sqlite3.Connection) -> sqlite3.Connection:
     conn.executescript(DDL)
+    add_missing_columns(conn)
     conn.commit()
     return conn
+
+
+def add_missing_columns(conn: sqlite3.Connection) -> None:
+    """给已存在的表补上后加的列（幂等；表不存在时由 DDL 建全，这里跳过）。"""
+    for table, column, declaration in ADDED_COLUMNS:
+        existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+        if existing and column not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
 
 def open_db(path: Path | None = None) -> sqlite3.Connection:

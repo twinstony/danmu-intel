@@ -11,6 +11,10 @@
 - `user_hash`：平台用户 ID 的加盐哈希，**不落明文身份**。
 - 写入用 `O_APPEND`，只增不改。
 
+同一份记录可能**在线**（`.jsonl`）也可能已**归档**（`.jsonl.zst`，ADR-0021）：
+本模块的读路径一律经 `common/evidence.py`，所以读取（含重算统计、贡献量、调取）
+在归档前后行为一致。
+
 同场多房间聚合的去重键 `(platform, room_id, msg_hash)` 也在这里给（纯函数，见
 `message_key` / `dedupe`）：键里带 `room_id` 意味着**不同房间的同文弹幕各算一条**。
 """
@@ -23,6 +27,8 @@ import os
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Iterable, Iterator
+
+from danmu_intel.common import evidence
 
 JSONL_FIELDS = ("ts", "platform", "room_id", "match_id", "user_hash", "text", "extra")
 MSG_HASH_LENGTH = 32
@@ -114,13 +120,16 @@ def decode_line(line: str) -> DanmuEvent:
 
 
 def count_lines(path: Path) -> int:
-    with path.open("rb") as handle:
+    with evidence.open_text(path) as handle:
         return sum(1 for _ in handle)
 
 
 def iter_events(path: Path) -> Iterator[tuple[int, DanmuEvent]]:
-    """逐行读原始记录，产出 `(行号, 事件)`；行号从 1 开始（溯源引用要用）。"""
-    with path.open("r", encoding="utf-8") as handle:
+    """逐行读原始记录，产出 `(行号, 事件)`；行号从 1 开始（溯源引用要用）。
+
+    归档件（`.jsonl.zst`）透明解压 —— 行号与在线时完全相同（AC-17 的可调取）。
+    """
+    with evidence.open_text(path) as handle:
         for line_no, line in enumerate(handle, start=1):
             line = line.strip()
             if line:

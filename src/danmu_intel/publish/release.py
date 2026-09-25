@@ -32,6 +32,7 @@ from typing import Callable, Collection, Mapping, Protocol, Sequence
 
 from danmu_intel.common import audit, notifications, paths
 from danmu_intel.common.matches import get_match
+from danmu_intel.common.sources import evidence_key
 from danmu_intel.publish.checks import failures, run_checks
 from danmu_intel.publish.site import SiteBuild, SiteTree, build_site
 from danmu_intel.publish.vercel import Deployment, VercelClient, VercelError
@@ -365,9 +366,13 @@ class RollbackResult:
 
 
 def seals(conn: sqlite3.Connection) -> dict[str, str]:
-    """落盘文件 → 采集时封存的 SHA256（发布检查的加固项与来源锚点）。"""
+    """落盘文件 → 采集时封存的 SHA256（发布检查的加固项与来源锚点）。
+
+    键用**规范地址**（在线那颗）：报告里冻结的是在线地址，而索引行归档后指向归档件
+    （ADR-0002/0021），不归一的话老页面逐项比封存值时会被静默跳过。
+    """
     rows = conn.execute("SELECT rel_path, sha256 FROM danmu_segments").fetchall()
-    return {row["rel_path"]: row["sha256"] for row in rows}
+    return {evidence_key(row["rel_path"]): row["sha256"] for row in rows}
 
 
 def await_deployment(ctx: ReleaseContext, ref: str | None) -> Deployment | None:

@@ -6,7 +6,7 @@
 - 设计：[`docs/design/ENGINEERING_DESIGN_v2.md`](docs/design/ENGINEERING_DESIGN_v2.md)
 - 领域术语：[`CONTEXT.md`](CONTEXT.md)｜架构决策：[`docs/adr/`](docs/adr/)
 
-## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9+T10+T11+T12）
+## 当前能力（T1+T2+T3+T4+T5+T6+T7+T8+T9+T10+T11+T12+T13）
 
 **T1**：虎牙**单直播间**真实弹幕 → append-only JSONL → 人工指定小局起止 → 基础统计 →
 规则直出**十一段**报告页。
@@ -94,7 +94,17 @@ IP / 访客哈希 / 身份字段（AC-9）。
 **所有写操作留痕**（含登录失败），页面渲染层一个写语句都没有。**凭据不进库**由三道自动
 防线拦住（扫描器 + pre-commit + 测试用例）。
 
-不含归档（见设计 §19 实施分层）。
+**T13**：**归档**（原始弹幕 6 个月 → NAS，归档后可调取、可核验）—— 采集日早于「今天回推
+6 个月」的落盘文件压成 `.jsonl.zst` 迁到归档根（NAS 共享的**挂载点** `<data>/archive`，
+默认要求它是独立挂载点，否则拒绝执行），**两份摘要都对得上**才删在线件：压缩前对一次封存值、
+压缩后再解压对一次，对不上就丢弃归档件、保留在线件（不静默、不背假封存值）。索引行的
+`rel_path` 改指向归档件并记 `archived_at`（同一次归档一个时刻，按它可查这次归档的完整范围）
+与 `archive_sha256`（归档件自身的摘要），而 `sha256` **仍是压缩前的整文件摘要** ——
+所以报告里冻结的溯源引用在归档后照样复核得过，发布检查不受影响
+（NFR-D-4；`raw/A.jsonl` ↔ `archive/A.jsonl.zst` 两个地址互为纯函数，`.jsonl.zst` 透明解压）。
+`archive --verify` 复核全部归档件，`archive --retrieve` 取回未压缩内容（取回前先对封存值）。
+**归档只碰 `danmu_segments` 与 `audit_log`**：切片/统计/报告/订单/会员/审计长期不删，
+统计明细 90 天的汇总仍是 T10 的 `site-stats --prune`（源码扫描 + 生命周期 e2e 双重断言）。
 
 ## 安装
 
@@ -171,6 +181,12 @@ danmu-intel alerts                       # 告警台账：同一 alert_key 发�
 # ⑫ 后台（独立进程；只监听 tailnet 地址，非 tailnet 请求 403）
 danmu-intel admin-passwd                            # 设管理员口令（只把哈希写进仓库外 .env）
 danmu-intel admin --host "$(tailscale ip -4)" --port 8090    # 12 个页面 + 16 个写操作
+
+# ⑬ 归档（原始弹幕 6 个月 → NAS；cron 友好；异常非零退出）
+danmu-intel archive --dry-run                       # 先看清哪些到期（不压缩、不移动）
+danmu-intel archive                                 # 压缩迁档 + 索引行改指向归档件 + 审计
+danmu-intel archive --verify                        # 复核全部归档件（存在 + 两个摘要）
+danmu-intel archive --retrieve raw/huya/2026-03-01/660000-16.jsonl --out 取回.jsonl
 ```
 
 ### 报告三形态怎么看（T5）
@@ -481,6 +497,49 @@ python3 -m pytest tests/e2e/test_admin_server.py        # 跑完一整轮后台�
 框架选型、12 与 11 的出入、tailnet 两层判定、`X-Forwarded-For` 的可信边界与
 「版本号为什么连数据源登记一起管」见 [ADR-0020](docs/adr/0020-admin-implementation.md)。
 
+### 归档怎么跑（T13）
+
+```bash
+# ① 挂 NAS：把共享挂到归档根（设计 §6 的目录布局就是这个位置）
+#   略：mount -t cifs //ocean.local/<share> ~/danmu-intel-data/archive -o …
+danmu-intel archive --dry-run        # 先看清哪些到期（不压缩、不移动；cron 先跑它也行）
+
+# ② 归档（cron 友好：到期 0 个就退 0；有异常非零退出并逐条打印）
+danmu-intel archive                  # 6 个月 → .jsonl.zst，索引行 rel_path 改指向归档件
+#   输出：归档根 …（保留期截止 2026-03-26）：到期 12 个文件 → 已归档 12 个（…，5.2×）
+#   本机演练（归档根与数据根同一磁盘）：加 --allow-same-disk
+
+# ③ 可核验 + 可调取
+danmu-intel archive --verify          # 全部归档件：文件在 + 自身摘要一致 + 解压后 == 封存值
+danmu-intel archive --retrieve raw/huya/2026-03-01/660000-16.jsonl --out 取回.jsonl
+#   取回的是未压缩内容（与采集时逐字节相同），取出前先对封存值，对不上就拒交
+```
+
+| 什么算到期 | 判据 |
+|---|---|
+| 原始弹幕落盘文件 | 采集日（取自 `raw/<平台>/<日期>/`）早于「今天回推 6 个月」 |
+| 覆盖范围 | **只有原始弹幕**；切片/统计/报告/订单/会员/审计长期不删（NFR-D-2） |
+| 统计明细 | 90 天 → 汇总入 `stats_daily` 再删（T10 的 `site-stats --prune`，与归档分开） |
+
+归档后**照旧可溯源**：报告里冻结的是生成那一刻的在线地址，`archive/…jsonl.zst` 与
+`raw/…jsonl` 互为纯函数地址，`.jsonl.zst` 透明解压，因此 `verify-sources`、整棵站点树重建
+与 7 项发布检查全部照常（NFR-D-4）。异常一律不静默：`raw/` 里超期却不在索引里的文件
+不归档也不删，命令非零退出交人处置。选型与取舍（NAS 用挂载点、stdlib zstd、
+`requires-python >= 3.14`、`rel_path` 为何改指向而 `sha256` 为何不动）见
+[ADR-0021](docs/adr/0021-archive.md)。
+
+**已有数据目录怎么过渡**（T1–T12 时代建的库）：**不用手工做任何事**。归档给
+`danmu_segments` 加了 `archived_at` / `archive_sha256` 两列，任何命令下一次打开库时
+幂等补齐（`PRAGMA table_info` → `ALTER TABLE ADD COLUMN`，与 `CREATE TABLE IF NOT EXISTS`
+同一个口径）—— 既有行一行不动，上面那两条命令因此直接就能跑。
+**别删库重建**：原始 JSONL 是账本，但索引行（封存摘要、采集会话、切片与报告的溯源）
+删了就补不回来（没有从 `raw/` 重建索引的命令，`contribution` / `rebuild` / `verify-sources`
+全靠那些行）。
+
+**归档件坏了会怎样**：`archive --verify` 报「归档件自身摘要不一致（存储/传输损坏）」
+非零退出；`archive --retrieve` **拒交**同一句人话（退出码 2）而不是抛压缩器的异常 ——
+在线件还在时更坏的情况已被挡在归档那一步（压缩后解压对不上就丢弃归档件、保留在线件）。
+
 ### 统计门槛怎么调（T4）
 
 门槛（灰信号 N/M/K、终局信号阈值、边界复核门槛）都在 `config` 表，改动留审计：
@@ -531,6 +590,7 @@ danmu-intel events       --match-id 1   # 事件流（pending/delivered/suppress
 | 内容 | 位置 | 进 git 吗 |
 |---|---|---|
 | 原始弹幕 JSONL | `~/danmu-intel-data/raw/<platform>/<yyyy-mm-dd>/<room_id>-<hh>.jsonl` | 否 |
+| 归档件（6 个月后） | `~/danmu-intel-data/archive/<platform>/<yyyy-mm-dd>/<room_id>-<hh>.jsonl.zst`（**NAS 挂载点**；解压后与采集时逐字节相同） | 否 |
 | SQLite | `~/danmu-intel-data/db.sqlite3`（WAL） | 否 |
 | 心跳文件 | `~/danmu-intel-data/runtime/heartbeat/<platform>-<room_id>.json` | 否 |
 | 用户哈希盐值 | `~/danmu-intel-data/salt`（0600） | 否 |
@@ -576,6 +636,11 @@ python3 tools/record_fixtures.py sanitize --platform soop \
 适配器契约测试（`tests/contract/test_adapter_contract.py`）**对注册表里的每个平台**
 跑同一套断言（字段齐备、时间单调、非法 payload 不崩、断流触发重连）；
 新增平台只需加一行注册 + 每个平台一行接线（回放工厂/适配器工厂/探测桩/样例链接）。
+
+归档的生命周期测试在 `tests/e2e/test_archive_lifecycle.py`：两场比赛（一场在保留期外、
+一场在保留期内）跑完「压缩迁档 → 调取 → 核验 → 账本不删 → 90 天明细汇总」，并断言归档后
+老页面（引用冻结的是在线地址）仍复核得过、整棵站点树重建仍通过 7 项检查、
+往归档件里追加一行仍被「封存摘要」拦下。
 
 采集监督的测试缝在 `tests/unit/test_supervisor.py`（假时钟 + 假子进程 + 真心跳）；
 `tests/e2e/test_supervisor_processes.py` 另外用**真进程**跑三个房间，验证
@@ -633,6 +698,12 @@ xpub → 地址链、EIP-55 向量，`tests/unit/test_billing_xpub.py`；xprv �
   （`0.0.0.0` 拒绝启动），每个请求再判一次对端 IP，非 tailnet 403；只有管理员一类角色，
   口令以 PBKDF2 哈希存仓库外 `.env`（0600），明文不落盘、不入库；
   所有写操作（含登录失败）进 `audit_log`。
+- **归档只迁原始弹幕、只碰两张表**（NFR-D-1..4 / AC-17）：6 个月到期后压缩迁到归档根
+  （NAS 挂载点，默认要求独立挂载点 —— 没挂上就拒绝执行，不悄悄写本地），
+  索引行改指向归档件、内容摘要（封存值）不变；切片/统计/报告/订单/会员/审计长期不删，
+  统计明细 90 天汇总入 `stats_daily`（T10）。归档件永久保留，**备份/副本策略在 NAS 侧**
+  （本仓库不实现备份工具与恢复演练，NFR-A-5）；`raw/` 下超期却没进索引的文件不归档、
+  不删除，命令非零退出交人处置（它不在证据链上，删了就是丢证据）。
 - 公开弹幕是唯一数据来源，不使用任何需要突破访问限制的手段。
 - 原始记录**不落明文身份**：只存平台用户 ID 的加盐哈希（`user_hash`）。
 - 灰信号只作风险提示，不指控、不点名、必须附样本与门槛（需求 §6.5）：产出物结构上装不下
