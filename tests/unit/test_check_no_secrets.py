@@ -21,6 +21,7 @@ FAKE_AWS = "AKIA" + "IOSFODNN7EXAMPLE"
 FAKE_MNEMONIC = "mnemonic" + ": abandon abandon abandon"
 FAKE_TELEGRAM = "123456789" + ":AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw"
 FAKE_KEYSTORE = "UTC--2024-01-01T00-00-00.000Z--" + "0123456789abcdef" * 2 + "01234567"
+FAKE_XPRV = "xprv" + "9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvN" + "2" * 30
 
 
 def test_scan_tree_is_clean_on_this_repo():
@@ -38,6 +39,7 @@ def test_scan_tree_is_clean_on_this_repo():
         FAKE_MNEMONIC,
         FAKE_TELEGRAM,
         FAKE_KEYSTORE,
+        FAKE_XPRV,
     ],
 )
 def test_scan_file_detects_secrets(tmp_path, content):
