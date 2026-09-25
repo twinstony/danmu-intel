@@ -28,7 +28,7 @@ from danmu_intel.common import paths
 from danmu_intel.common.matches import set_match_state
 from danmu_intel.pipeline import generate_and_publish
 from tests.e2e.test_publish_loop import publish_brief
-from tests.unit.test_billing_xpub import ACCOUNT_XPUB, ADDRESSES
+from tests.unit.test_billing_xpub import ACCOUNT_XPUB
 from tools.check_no_secrets import scan_tree
 
 BASE_MS = 1_790_064_000_000
