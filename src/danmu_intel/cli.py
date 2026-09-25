@@ -158,6 +158,8 @@ def _cmd_supervise(args: argparse.Namespace) -> int:
                 f"房间 {run.room.platform}/{run.room.room_id}：{run.state}｜"
                 f"重启 {run.restarts} 次｜重连 {run.reconnects} 次"
             )
+            if run.config_restarts:
+                line += f"｜按新配置重起 {run.config_restarts} 次"
             print(line + (f"｜停止原因：{run.reason}" if run.reason else ""))
         if supervisor.stopped_rooms():
             return 1

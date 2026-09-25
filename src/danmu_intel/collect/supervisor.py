@@ -7,6 +7,10 @@
 - **同一房间 30 分钟内重启超过 `RESTART_LIMIT` 次 → 停止重试**，原因写进库
   （`restart_exceeded` 事件），不靠内存里的状态；
 - 子进程活着但心跳老化（>15 秒）→ 判定僵死，杀掉重启（`process_hung` 事件）；
+- **配置版本号变了 → 立刻按新配置重起**（`config_changed`）：这是 NFR-T-4「配置改动
+  1 分钟内生效」在子进程侧的那一半（轮询周期 5 秒 ≪ 60 秒）。配置改动对子进程的影响
+  映射会随配置项而变，因此不去猜「哪把键影响哪个房间」，宁可多起一次（落盘与会话接着来），
+  也不让旧配置继续跑；配置重起**不计入重启上限**（它不是故障，是人改的配置）；
 - 子进程死了以后，它这一小时里已落盘但还没封存的文件由主进程补封（`seal_pending_files`），
   证据不许因为进程被杀而漏掉。
 
@@ -42,7 +46,7 @@ from danmu_intel.collect.incidents import (
     worst,
 )
 from danmu_intel.collect.runner import now_ms, seal_pending_files
-from danmu_intel.common import paths
+from danmu_intel.common import config_store, paths
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +57,7 @@ RESTART_WINDOW_S = 1800.0  # 「30 分钟内」防雪崩窗口
 HEARTBEAT_STARTUP_GRACE_S = 30.0  # 首次心跳宽限（进程启动+建库+首条心跳的正常耗时不超 1 秒）
 KILL_GRACE_S = 5.0  # terminate 到 kill 的宽限
 CHILD_MODULE = "danmu_intel"
+CONFIG_CHANGED = "config_changed"  # 配置版本号变了，按新配置重起子进程
 
 
 class ChildProcess(Protocol):
@@ -89,6 +94,7 @@ class RoomRun:
     state: str = "starting"
     stopped: bool = False  # 停止重试（重启超限）
     reason: str | None = None  # 停止重试的原因
+    config_restarts: int = 0  # 因配置版本号变化而重起的次数（不是故障，不计入上限）
 
     @property
     def pid(self) -> int | None:
@@ -185,6 +191,7 @@ class Supervisor:
         self._read_beat = read_beat or (
             lambda room: read_heartbeat(room.platform, room.room_id, data_root=self.data_root)
         )
+        self.config_version = config_store.version(conn)
         self.runs: list[RoomRun] = [RoomRun(room=room, match_id=match_id) for room in rooms]
 
     # —— 对外 ——
@@ -235,6 +242,7 @@ class Supervisor:
     def tick(self, now: int | None = None) -> None:
         """一次轮询（时钟可注入：测试直接喂时刻，不必真等）。"""
         moment = self.clock() if now is None else now
+        self._reload_config(moment)
         for run in self.runs:
             if run.process is None:
                 if not run.stopped and moment >= run.next_attempt_at:
@@ -267,6 +275,45 @@ class Supervisor:
             run.room.room_id,
             process.pid,
             run.restarts,
+        )
+
+    def _reload_config(self, now: int) -> None:
+        """配置版本号变了 → 让子进程按新配置重起（NFR-T-4 的跨进程那一半）。
+
+        纯轮询判定，不靠信号也不靠内存里的时间戳：库里的版本号是唯一真相源，
+        因此监督进程重启后再接着跑也不会错过一次配置变更。
+        """
+        current = config_store.version(self.conn)
+        if current == self.config_version:
+            return
+        self.config_version = current
+        for run in self.runs:
+            if run.process is None:
+                continue
+            self._restart_for_config(now, run, version=current)
+
+    def _restart_for_config(self, now: int, run: RoomRun, *, version: int) -> None:
+        """按新配置重起一个房间的子进程：立刻（不退避）且不动重启上限。
+
+        退出事件不报（这不是故障，是人改了配置）、会话行按正常退出收尾
+        （已落盘的文件照旧补封），新子进程自己开一条新会话。
+        """
+        pid = run.pid
+        returncode = self._terminate(run)
+        self._close_session(
+            run, returncode=returncode, reason=CONFIG_CHANGED, severity="info", emit_exit=False
+        )
+        run.process = None
+        run.session_id = None
+        run.state = "restarting"
+        run.next_attempt_at = now
+        run.config_restarts += 1
+        logger.info(
+            "【%s/%s】配置已更新到 v%d，按新配置重起子进程（原 pid=%s，退避 0 秒）",
+            run.room.platform,
+            run.room.room_id,
+            version,
+            pid,
         )
 
     def _check_heartbeat(self, now: int, run: RoomRun) -> None:
