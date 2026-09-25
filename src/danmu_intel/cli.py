@@ -2,6 +2,7 @@
 
     danmu-intel collect --url https://www.huya.com/660000 --seconds 300 --match-id 1
     danmu-intel supervise --match-id 1 --room … --room … --room …   # 多房间并发 + 监督
+    danmu-intel supervise --match-id 1 --from-registry    # 房间集合取后台登记表（增删 1 分钟生效）
     danmu-intel health --match-id 1            # 每房间健康状态（心跳/重连/重启/严重级别）
     danmu-intel contribution --match-id 1      # 每房间贡献量（条数/跨度/去重后条数）
     danmu-intel events --match-id 1            # 采集异常事件（待 T11 投递）
@@ -33,6 +34,8 @@
     danmu-intel members                                 # 会员列表；--sweep 执行到期降级
     danmu-intel grant --order-ref DM… --tx-ref 0x… --reason "…"   # 人工补开通（AC-5）
     danmu-intel serve                                   # HTTP 面：下单 / 领取 / 校验 / 付费正文 / 统计上报
+    danmu-intel admin-passwd                            # 设后台口令（只把 PBKDF2 哈希写进仓库外 .env）
+    danmu-intel admin --host 100.64.0.1 --port 8090     # 后台（独立进程；只监听 tailnet，12 个页面）
     danmu-intel chain-watch --orders                    # 从待付订单派生监听目标并对账开通（AC-3）
     danmu-intel site-stats --day 2026-09-22             # 那天多少人来过付费页（AC-9：答不了是谁）
     danmu-intel site-stats --prune                      # 站点统计：90 天明细先汇总入 stats_daily 再删
@@ -49,6 +52,10 @@
 `chain-watch` 的凭据（`POLYGONSCAN_API_KEY` / `HELIUS_API_KEY`）只放仓库外 `.env`（0600）；
 一次调用记一次 `quota_usage`，用量 >80% 或撞限速都会写一条待投递报警（投递属 T11）。
 
+后台（`admin`）与公开面是两个进程：公开面走 Funnel 暴露，后台只绑 tailnet 地址、每个请求再判一次
+对端 IP，非 tailnet 一律 403（NFR-S-3 / AC-7）。后台的口令是 PBKDF2 哈希（仓库外 `.env`，0600），
+登录态是 12 小时的签名 cookie；12 个页面只读，16 个写操作全部落 `audit_log`。
+
 `report` 的解读层：配了凭据（仓库外 `.env`，0600，键 `DEEPSEEK_API_KEY`）就走受约束的
 LLM 调用 + 反幻觉校验 + 成本硬闸；没配/超时/报错/校验不过就回落规则直出，并在命令输出、
 报告第 10 段与页面横幅上标注降级与原因（降级不静默）。
@@ -58,6 +65,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import logging
 import sys
@@ -140,23 +148,50 @@ def _cmd_collect(args: argparse.Namespace) -> int:
 
 
 def _cmd_supervise(args: argparse.Namespace) -> int:
-    """多房间并发采集：一房间一子进程，退出/僵死自动拉起，超限停下来报事。"""
-    from danmu_intel.collect import get_adapter
-    from danmu_intel.collect.supervisor import Supervisor
+    """多房间并发采集：一房间一子进程，退出/僵死自动拉起，超限停下来报事。
 
-    adapter = get_adapter(args.platform)
-    rooms = [adapter.parse_room(url) for url in args.room]
-    seen: set[tuple[str, str]] = set()
-    for room in rooms:
-        key = (room.platform, room.room_id)
-        if key in seen:
-            raise ValueError(f"重复的直播间：{room.platform}/{room.room_id}（--room 不能重复）")
-        seen.add(key)
+    `--from-registry` 时房间集合来自库里的登记表（后台「房间与数据源」页登记的），
+    并在监督过程中按版本号增/停子进程 —— 于是后台改动 1 分钟内对采集生效（FR-C8-2）。
+    """
+    from danmu_intel.collect import get_adapter
+    from danmu_intel.collect.adapter import RoomKey
+    from danmu_intel.collect.supervisor import Supervisor
+    from danmu_intel.common import rooms as rooms_module
 
     conn = open_db()
     try:
         get_match(conn, args.match_id)
-        supervisor = Supervisor(conn, rooms, match_id=args.match_id, data_root=paths.data_dir())
+        adapter = get_adapter(args.platform)
+        registry = None
+        if getattr(args, "from_registry", False):
+
+            def registry() -> list[RoomKey]:
+                """每次读一遍登记表：后台增/删的直播间都要看得见（FR-C8-2）。"""
+                return [
+                    RoomKey(room.platform, room.room_id, room.url)
+                    for room in rooms_module.list_rooms(conn)
+                ]
+
+            rooms = registry()
+            if not rooms:
+                raise ValueError(
+                    "登记表里还没有任何直播间：先跑 danmu-intel supervise --room …，"
+                    "或在后台「房间与数据源」页登记"
+                )
+        else:
+            rooms = [adapter.parse_room(url) for url in args.room or []]
+            if not rooms:
+                raise ValueError("至少要给一个 --room，或用 --from-registry 从登记表读房间")
+        seen: set[tuple[str, str]] = set()
+        for room in rooms:
+            key = (room.platform, room.room_id)
+            if key in seen:
+                raise ValueError(f"重复的直播间：{room.platform}/{room.room_id}（--room 不能重复）")
+            seen.add(key)
+
+        supervisor = Supervisor(
+            conn, rooms, match_id=args.match_id, data_root=paths.data_dir(), registry=registry
+        )
         print(f"开始监督 {len(rooms)} 个直播间（比赛 #{args.match_id}）：" + "、".join(f"{r.platform}/{r.room_id}" for r in rooms))
         try:
             supervisor.run(seconds=args.seconds)
@@ -167,6 +202,8 @@ def _cmd_supervise(args: argparse.Namespace) -> int:
                 f"房间 {run.room.platform}/{run.room.room_id}：{run.state}｜"
                 f"重启 {run.restarts} 次｜重连 {run.reconnects} 次"
             )
+            if run.config_restarts:
+                line += f"｜按新配置重起 {run.config_restarts} 次"
             print(line + (f"｜停止原因：{run.reason}" if run.reason else ""))
         if supervisor.stopped_rooms():
             return 1
@@ -1168,6 +1205,66 @@ def _cmd_chain_usage(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_admin_passwd(args: argparse.Namespace) -> int:
+    """设/改后台口令：只把 **PBKDF2 哈希**写进仓库外 `.env`（0600），明文不落盘。"""
+    from danmu_intel.admin import auth
+
+    target = paths.env_path()
+    first = getpass.getpass(f"新后台口令（写入 {target}）：")
+    second = getpass.getpass("再输一次：")
+    if first != second:
+        print("错误：两次输入不一致", file=sys.stderr)
+        return 2
+    try:
+        auth.save_password(target, first)
+    except (auth.AuthError, CredentialError) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+    print(f"已写入后台口令哈希：{target}（0600；明文没有落盘）")
+    print("起后台：danmu-intel admin --host <tailscale ip -4> --port 8090")
+    return 0
+
+
+def _cmd_admin(args: argparse.Namespace) -> int:
+    """后台（独立进程 + 仅 tailnet 可达 + 单管理员）：12 个页面 + 全部写操作留痕。"""
+    from danmu_intel.admin import auth, server
+
+    try:
+        auth.require_tailnet_host(args.host)  # 先验地址：非 tailnet 直接拒绝启动
+        auth.load_secrets()
+    except (auth.AuthError, CredentialError) as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+
+    conn = open_db()
+
+    def release() -> ReleaseContext:
+        """按需构造：只有点发布/回滚才用（构造会去碰 git 与 Vercel 配置）。"""
+        return _release_context(args)
+
+    print(
+        f"后台监听 {args.host}:{args.port}（只接受 tailnet 对端；12 个页面；"
+        f"{'发布/回滚只落本地产物' if args.no_deploy else '发布/回滚走真实 git + Vercel'}）"
+    )
+    try:
+        server.run(
+            conn=conn,
+            host=args.host,
+            port=args.port,
+            data_root=paths.data_dir(),
+            release=release,
+            secure_cookie=args.secure_cookie,
+        )
+    except KeyboardInterrupt:
+        print("收到中断，已停止后台")
+    except auth.AuthError as exc:
+        print(f"错误：{exc}", file=sys.stderr)
+        return 2
+    finally:
+        conn.close()
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="danmu-intel", description="弹幕情报库（采集→监督→切片→统计→报告三形态）")
     parser.add_argument("--verbose", action="store_true", help="打印重连等运行日志")
@@ -1181,7 +1278,11 @@ def build_parser() -> argparse.ArgumentParser:
     collect.set_defaults(func=_cmd_collect)
 
     supervise = sub.add_parser("supervise", help="多房间并发采集与监督（一房间一子进程）")
-    supervise.add_argument("--room", action="append", required=True, metavar="URL", help="直播间链接，可重复")
+    supervise.add_argument("--room", action="append", default=None, metavar="URL", help="直播间链接，可重复")
+    supervise.add_argument(
+        "--from-registry", action="store_true",
+        help="房间集合从登记表读（后台登记/删除的房间 1 分钟内生效，FR-C8-2）",
+    )
     supervise.add_argument("--platform", default="huya", help="平台标识（默认 huya）")
     supervise.add_argument("--match-id", type=int, required=True)
     supervise.add_argument("--seconds", type=float, default=None, help="监督时长（秒），缺省则跑到所有房间停下")
@@ -1382,6 +1483,20 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--host", default="127.0.0.1", help="监听地址（默认只监听本机，公网靠 Funnel）")
     serve.add_argument("--port", type=int, default=8080)
     serve.set_defaults(func=_cmd_serve)
+
+    admin_passwd = sub.add_parser("admin-passwd", help="设/改后台口令（只写哈希进仓库外 .env）")
+    admin_passwd.set_defaults(func=_cmd_admin_passwd)
+
+    admin = sub.add_parser("admin", help="后台进程（仅 tailnet 可达）：12 个页面 + 写操作留痕")
+    admin.add_argument("--host", required=True, help="监听地址，必须是 tailnet 地址（`tailscale ip -4`）")
+    admin.add_argument("--port", type=int, default=8090)
+    admin.add_argument("--no-deploy", action="store_true", help="发布/回滚只落本地产物：不推 git、不调 Vercel")
+    admin.add_argument("--actor", default="admin", help="后台写操作的操作者（进审计）")
+    admin.add_argument(
+        "--secure-cookie", action="store_true",
+        help="经 https 反代访问时给会话 cookie 加 Secure（直连 tailnet http 时不要加）",
+    )
+    admin.set_defaults(func=_cmd_admin)
 
     site_stats = sub.add_parser(
         "site-stats", help="站点统计：某天的访问量/付费页人数/下单转化/留资（--prune 做 90 天保留）"

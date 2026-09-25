@@ -15,12 +15,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import time
 from dataclasses import dataclass, fields
 from typing import Any
 
 from danmu_intel.chain.transfer import NETWORKS, POLYGON, SOLANA
-from danmu_intel.common import audit
+from danmu_intel.common import audit, config_store
 
 CONFIG_KEY = "billing"
 
@@ -197,11 +196,8 @@ def format_units(units: int) -> str:
 
 
 def load_billing_config(conn: sqlite3.Connection) -> BillingConfig:
-    """读配置：默认值 + `config` 表里 `billing` 键的覆盖。"""
-    row = conn.execute("SELECT value_json FROM config WHERE key=?", (CONFIG_KEY,)).fetchone()
-    if row is None:
-        return BillingConfig()
-    return BillingConfig.from_dict(json.loads(row["value_json"]))
+    """读配置：默认值 + `config` 表里 `billing` 键的覆盖（走 60s TTL 缓存，NFR-T-4）。"""
+    return BillingConfig.from_dict(config_store.load(conn, CONFIG_KEY))
 
 
 def save_billing_config(
@@ -210,7 +206,7 @@ def save_billing_config(
     """改档位/价格/收款配置并留审计（FR-C6-2：改价格不影响已生效的会员）。
 
     已生效的会员不受影响：`members.expires_at` 是开通那一刻就算好的死日子，
-    不随价格或时长变化重算。
+    不随价格或时长变化重算。写入同时递增配置版本号（后台改价 → ≤60s 生效）。
     """
     current = load_billing_config(conn)
     updated = BillingConfig.from_dict({**current.as_dict(), **changes})
@@ -222,16 +218,5 @@ def save_billing_config(
         detail={"before": current.as_dict(), "after": updated.as_dict()},
         ts=ts,
     )
-    conn.execute(
-        "INSERT INTO config(key, value_json, updated_at, updated_by) VALUES(?, ?, ?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json, "
-        "updated_at=excluded.updated_at, updated_by=excluded.updated_by",
-        (
-            CONFIG_KEY,
-            updated.to_json(),
-            int(time.time() * 1000) if ts is None else ts,
-            actor,
-        ),
-    )
-    conn.commit()
+    config_store.save(conn, CONFIG_KEY, updated.as_dict(), actor=actor, ts=ts)
     return updated

@@ -33,6 +33,7 @@ class SliceWindow:
     boundary_source: str
     conflict_note: str | None = None
     override_by: str | None = None
+    override_at: int | None = None  # 人工修正时刻（「谁、何时、改了什么」里的「何时」）
     override_reason: str | None = None
 
 
@@ -126,6 +127,7 @@ def load_slices(conn: sqlite3.Connection, match_id: int) -> list[SliceWindow]:
             boundary_source=row["boundary_source"],
             conflict_note=row["conflict_note"],
             override_by=row["override_by"],
+            override_at=row["override_at"],
             override_reason=row["override_reason"],
         )
         for row in rows

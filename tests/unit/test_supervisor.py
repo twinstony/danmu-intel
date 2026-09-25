@@ -22,6 +22,7 @@ from danmu_intel.collect.heartbeat import (
     write_heartbeat,
 )
 from danmu_intel.collect.incidents import PROCESS_EXIT, PROCESS_HUNG, RESTART_EXCEEDED, recent
+from danmu_intel.common.config import save_stats_config
 from danmu_intel.collect.supervisor import (
     HEARTBEAT_STALE_S,
     RESTART_LIMIT,
@@ -462,3 +463,107 @@ def test_varied_severities_are_accepted_by_the_state_machine(conn, data_root, se
     harness.died(returncode=1)
     row = conn.execute("SELECT severity FROM room_sessions WHERE id=?", (session_id,)).fetchone()
     assert row["severity"] == max(severity, "warning", key=["info", "warning", "critical"].index)
+
+
+# —— 配置版本号 → 子进程重启（NFR-T-4：配置改动 1 分钟内生效）——
+
+
+def test_config_change_restarts_child_immediately(conn, data_root):
+    """配置版本号变了：立刻（不退避）杀掉旧子进程并拉起新子进程。"""
+    harness = Harness(conn, data_root=data_root)
+    harness.tick()
+    old = harness.alive()
+    session_id = harness.seed_session()
+    run = harness.supervisor.runs[0]
+    assert run.config_restarts == 0
+
+    save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 9})
+    harness.tick()
+
+    assert old.terminated is True, "旧子进程必须停下来（不能带着旧配置继续跑）"
+    assert run.config_restarts == 1
+    # 同一个 tick 里就拉起来了：next_attempt_at = 现在，不等退避（≤5 秒的轮询粒度 ≪ 60 秒）
+    assert len(harness.processes) == 2
+    assert run.process is not old and run.state == "running"
+    assert harness.now - BASE_TS < supervisor_module.POLL_INTERVAL_S * 1000, "配置生效不等退避"
+    row = conn.execute("SELECT * FROM room_sessions WHERE id=?", (session_id,)).fetchone()
+    assert row["state"] == "exited" and row["ended_at"] is not None
+    assert row["severity"] == "info", "人工改配置不是采集异常"
+
+
+def test_config_restart_does_not_count_toward_restart_limit(conn, data_root):
+    """配置重起不是故障：改几次配置都不该把房间推进「重启超限停止重试」。"""
+    harness = Harness(conn, data_root=data_root)
+    harness.tick()
+    for index in range(RESTART_LIMIT + 2):
+        save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 5 + index})
+        harness.tick()
+        harness.tick()
+    run = harness.supervisor.runs[0]
+    assert run.config_restarts == RESTART_LIMIT + 2
+    assert run.restarts == 0 and run.restart_history == [] and run.stopped is False
+    assert run.process is not None, "改完配置照样在采"
+    assert harness.incident_kinds() == [], "配置重起不产生「采集进程退出」事件"
+
+
+def test_config_change_without_running_children_does_nothing(conn, data_root):
+    """没有在跑的子进程（比如全部停下来了）就不重起，只把版本号记下来。"""
+    harness = Harness(conn, data_root=data_root)
+    save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 7})
+    harness.tick()
+    assert len(harness.processes) == 1, "该拉起来还是拉起来（版本号变了不影响首次启动）"
+    assert harness.supervisor.runs[0].config_restarts == 0
+
+
+def test_config_version_is_reread_from_the_db(conn, data_root):
+    """版本号从库里读：监督进程重启后再接着跑也不会错过一次配置变更。"""
+    harness = Harness(conn, data_root=data_root)
+    harness.tick()
+    save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 4})
+    restarted = Harness(conn, data_root=data_root)
+    assert restarted.supervisor.config_version == 1
+    restarted.tick()
+    assert restarted.supervisor.runs[0].config_restarts == 0, "版本号已在启动时对齐，不必白重起"
+
+
+# —— 数据源登记表 → 增/停子进程（FR-C8-2：1 分钟内生效）——
+
+
+def test_registry_adds_and_removes_rooms_on_version_change(conn, data_root):
+    """后台登记/删除直播间 → 版本号变 → 监督进程对齐房间集合并拉/停子进程。"""
+    from danmu_intel.common import rooms as rooms_module
+
+    def read_registry() -> list[RoomKey]:
+        return [
+            RoomKey(room.platform, room.room_id, room.url)
+            for room in rooms_module.list_rooms(conn)
+        ]
+
+    harness = Harness(conn, [ROOM], data_root=data_root)
+    harness.supervisor.registry = read_registry
+    harness.tick()
+    assert len(harness.supervisor.runs) == 1
+
+    # 后台登记第二个直播间：版本号一变，新房间立刻纳入监督
+    rooms_module.add_room(conn, platform="huya", room_id="323444", url=OTHER_ROOM.url, actor="admin")
+    harness.tick()
+    assert [run.room.room_id for run in harness.supervisor.runs] == ["660000", "323444"]
+    assert harness.supervisor.runs[1].process is not None, "新房间要真的被拉起来"
+
+    # 后台删掉第一个：它的子进程被停掉，并记下原因（不是重启超限）
+    first = rooms_module.list_rooms(conn)[0]
+    rooms_module.delete_room(conn, first.id, actor="admin")
+    harness.tick()
+    removed = harness.supervisor.runs[0]
+    assert removed.stopped is True and removed.state == "removed"
+    assert "登记表" in (removed.reason or "")
+    assert harness.processes[0].terminated is True
+    assert removed.config_restarts == 0, "被删除的房间不该再按配置重起一遍"
+
+
+def test_registry_is_ignored_when_not_configured(conn, data_root):
+    harness = Harness(conn, data_root=data_root)
+    harness.tick()
+    save_stats_config(conn, actor="管理员", changes={"gray_min_hits": 8})
+    harness.tick()
+    assert [run.room.room_id for run in harness.supervisor.runs] == ["660000"]

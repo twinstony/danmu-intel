@@ -19,7 +19,9 @@ danmu-intel = "danmu_intel.cli:main"
 where = ["src"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+# `src` 是包本体；`.` 是仓库根 —— `tests/unit/test_check_no_secrets.py` 要 import `tools`，
+# 装没装 editable 都得能跑（`pytest` 与 `python -m pytest` 两种起法都要成立）。
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 addopts = "-q --cov=danmu_intel --cov-report=term-missing --cov-fail-under=90"
 filterwarnings = ["error"]

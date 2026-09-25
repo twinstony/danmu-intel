@@ -3,6 +3,7 @@
 **只增不改**：谁在什么时候改了什么，逐条追加。T4 用它记两件事：
 
 - `slice.override`：人工修正切片边界（需求 FR-C2-5「修正结果为准且留痕」）。
+- `slice.manual`：后台上新建一个小局切片（新建没有「前值」可比，因此与覆盖分成两个动作）。
 - `slice.boundary`：自动边界裁决的落库结果（采用/跳过都能回答「为什么」）。
 - `config.update`：统计门槛改动（设计 §9.1 灰信号第 4 条「门槛参数写在 config 表，改动留审计」）。
 - `billing.*`（T9）：会员开通/续费（`billing.member.granted`，带 `tx_ref` 幂等键）、
@@ -23,6 +24,7 @@ from dataclasses import dataclass
 from typing import Any
 
 SLICE_OVERRIDE = "slice.override"
+SLICE_MANUAL = "slice.manual"  # 后台上新建一个小局切片（覆盖已有边界走 `slice.override`）
 SLICE_BOUNDARY = "slice.boundary"
 CONFIG_UPDATE = "config.update"
 

@@ -7,6 +7,13 @@
 - **同一房间 30 分钟内重启超过 `RESTART_LIMIT` 次 → 停止重试**，原因写进库
   （`restart_exceeded` 事件），不靠内存里的状态；
 - 子进程活着但心跳老化（>15 秒）→ 判定僵死，杀掉重启（`process_hung` 事件）；
+- **配置版本号变了 → 立刻按新配置重起**（`config_changed`）：这是 NFR-T-4「配置改动
+  1 分钟内生效」在子进程侧的那一半（轮询周期 5 秒 ≪ 60 秒）。配置改动对子进程的影响
+  映射会随配置项而变，因此不去猜「哪把键影响哪个房间」，宁可多起一次（落盘与会话接着来），
+  也不让旧配置继续跑；配置重起**不计入重启上限**（它不是故障，是人改的配置）；
+- **数据源登记表变了 → 增/停对应的子进程**（`registry`）：后台在页面上登记或删掉一个
+  直播间，改动同样递增版本号，于是这里读到新版本时顺手对齐房间集合
+  （FR-C8-1/C8-2、需求 §3.4「添加直播间 → 一分钟内生效，无需重启服务」）；
 - 子进程死了以后，它这一小时里已落盘但还没封存的文件由主进程补封（`seal_pending_files`），
   证据不许因为进程被杀而漏掉。
 
@@ -42,7 +49,7 @@ from danmu_intel.collect.incidents import (
     worst,
 )
 from danmu_intel.collect.runner import now_ms, seal_pending_files
-from danmu_intel.common import paths
+from danmu_intel.common import config_store, paths
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +60,7 @@ RESTART_WINDOW_S = 1800.0  # 「30 分钟内」防雪崩窗口
 HEARTBEAT_STARTUP_GRACE_S = 30.0  # 首次心跳宽限（进程启动+建库+首条心跳的正常耗时不超 1 秒）
 KILL_GRACE_S = 5.0  # terminate 到 kill 的宽限
 CHILD_MODULE = "danmu_intel"
+CONFIG_CHANGED = "config_changed"  # 配置版本号变了，按新配置重起子进程
 
 
 class ChildProcess(Protocol):
@@ -71,6 +79,7 @@ class ChildProcess(Protocol):
 
 Spawner = Callable[[list[str], dict[str, str]], ChildProcess]
 BeatReader = Callable[[RoomKey], Heartbeat | None]
+RoomRegistry = Callable[[], list[RoomKey]]
 
 
 @dataclass
@@ -89,6 +98,7 @@ class RoomRun:
     state: str = "starting"
     stopped: bool = False  # 停止重试（重启超限）
     reason: str | None = None  # 停止重试的原因
+    config_restarts: int = 0  # 因配置版本号变化而重起的次数（不是故障，不计入上限）
 
     @property
     def pid(self) -> int | None:
@@ -103,8 +113,9 @@ def child_invocation(
 ) -> tuple[list[str], dict[str, str]]:
     """子进程命令行与环境（纯函数，便于断言；真拉起是 `subprocess.Popen`）。
 
-    环境里两件事：`DANMU_INTEL_DATA` 让父子写同一个数据目录，
-    `DANMU_INTEL_SUPERVISION` 把重启次数与累计重连数接力给子进程。
+    环境里三件事：`DANMU_INTEL_DATA` 让父子写同一个数据目录，
+    `DANMU_INTEL_SUPERVISION` 把重启次数与累计重连数接力给子进程，
+    `PYTHONPATH` 把父进程找到 `danmu_intel` 的那个目录接力给子进程。
     """
     command = [
         python or sys.executable,
@@ -121,7 +132,24 @@ def child_invocation(
     environment = dict(os.environ)
     environment.update(supervision_env(Supervision(run.restarts, run.reconnects)))
     environment[paths.DATA_DIR_ENV] = str(data_root)
+    _inherit_import_path(environment)
     return command, environment
+
+
+def _inherit_import_path(environment: dict[str, str]) -> None:
+    """把「父进程是从哪儿 import 到 `danmu_intel` 的」递进子进程环境（就地改）。
+
+    子进程是全新解释器，只继承环境变量、不继承 `sys.path`。装好包的生产环境不需要它，
+    但**源树里跑**（`pytest` 的 `pythonpath=src`、`python -m danmu_intel`）时父进程的
+    `sys.path` 是唯一线索 —— 不递过去，子进程会当场 `No module named danmu_intel` 退出，
+    然后被当成故障反复重拉，真故障反而淹没在噪声里。
+    """
+    package = sys.modules.get(CHILD_MODULE)
+    if package is None or not getattr(package, "__file__", None):
+        return
+    search = str(Path(package.__file__).resolve().parent.parent)
+    existing = environment.get("PYTHONPATH")
+    environment["PYTHONPATH"] = f"{search}{os.pathsep}{existing}" if existing else search
 
 
 def popen(command: list[str], environment: dict[str, str]) -> ChildProcess:
@@ -173,6 +201,7 @@ class Supervisor:
         spawn: Spawner | None = None,
         read_beat: BeatReader | None = None,
         poll_interval: float | None = None,
+        registry: RoomRegistry | None = None,
     ) -> None:
         self.conn = conn
         self.match_id = match_id
@@ -185,6 +214,9 @@ class Supervisor:
         self._read_beat = read_beat or (
             lambda room: read_heartbeat(room.platform, room.room_id, data_root=self.data_root)
         )
+        self.config_version = config_store.version(conn)
+        #: 数据源登记表的读取器（`None` = 房间集合由命令行给定，不随库变化）
+        self.registry = registry
         self.runs: list[RoomRun] = [RoomRun(room=room, match_id=match_id) for room in rooms]
 
     # —— 对外 ——
@@ -235,6 +267,7 @@ class Supervisor:
     def tick(self, now: int | None = None) -> None:
         """一次轮询（时钟可注入：测试直接喂时刻，不必真等）。"""
         moment = self.clock() if now is None else now
+        self._reload_config(moment)
         for run in self.runs:
             if run.process is None:
                 if not run.stopped and moment >= run.next_attempt_at:
@@ -267,6 +300,74 @@ class Supervisor:
             run.room.room_id,
             process.pid,
             run.restarts,
+        )
+
+    def _reload_config(self, now: int) -> None:
+        """配置版本号变了 → 对齐数据源 + 让子进程按新配置重起（NFR-T-4 的跨进程那一半）。
+
+        纯轮询判定，不靠信号也不靠内存里的时间戳：库里的版本号是唯一真相源，
+        因此监督进程重启后再接着跑也不会错过一次配置变更。
+        """
+        current = config_store.version(self.conn)
+        if current == self.config_version:
+            return
+        self.config_version = current
+        self._sync_registry(now)
+        for run in self.runs:
+            if run.process is None or run.stopped:
+                continue
+            self._restart_for_config(now, run, version=current)
+
+    def _sync_registry(self, now: int) -> None:
+        """按登记表对齐房间集合：多出来的房间停掉，新登记的房间立刻排上。"""
+        if self.registry is None:
+            return
+        wanted = {(room.platform, room.room_id): room for room in self.registry()}
+        known = {(run.room.platform, run.room.room_id) for run in self.runs}
+        for run in self.runs:
+            if (run.room.platform, run.room.room_id) in wanted or run.stopped:
+                continue
+            self._drop_room(run)
+        for key, room in wanted.items():
+            if key in known:
+                continue
+            logger.info("【%s/%s】数据源新增，纳入监督", room.platform, room.room_id)
+            self.runs.append(RoomRun(room=room, match_id=self.match_id, next_attempt_at=now))
+
+    def _drop_room(self, run: RoomRun) -> None:
+        """一个房间从数据源里被删掉了：停掉它的子进程，并记下原因（不是重启超限）。"""
+        if run.process is not None:
+            returncode = self._terminate(run)
+            self._close_session(run, returncode=returncode, reason="room_removed", severity="info",
+                                emit_exit=False)
+            run.process = None
+        run.stopped = True
+        run.state = "removed"
+        run.reason = "已从数据源登记表里删除（后台删掉了这个直播间）"
+        logger.info("【%s/%s】%s", run.room.platform, run.room.room_id, run.reason)
+
+    def _restart_for_config(self, now: int, run: RoomRun, *, version: int) -> None:
+        """按新配置重起一个房间的子进程：立刻（不退避）且不动重启上限。
+
+        退出事件不报（这不是故障，是人改了配置）、会话行按正常退出收尾
+        （已落盘的文件照旧补封），新子进程自己开一条新会话。
+        """
+        pid = run.pid
+        returncode = self._terminate(run)
+        self._close_session(
+            run, returncode=returncode, reason=CONFIG_CHANGED, severity="info", emit_exit=False
+        )
+        run.process = None
+        run.session_id = None
+        run.state = "restarting"
+        run.next_attempt_at = now
+        run.config_restarts += 1
+        logger.info(
+            "【%s/%s】配置已更新到 v%d，按新配置重起子进程（原 pid=%s，退避 0 秒）",
+            run.room.platform,
+            run.room.room_id,
+            version,
+            pid,
         )
 
     def _check_heartbeat(self, now: int, run: RoomRun) -> None:

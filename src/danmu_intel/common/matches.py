@@ -11,7 +11,10 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
+from danmu_intel.common import audit
+
 MATCH_STATES = ("scheduled", "live", "between_games", "ended", "aborted")
+ACTION_DELETE = "match.delete"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +116,42 @@ def set_match_state(
     )
     conn.commit()
     return get_match(conn, match_id)
+
+
+def delete_match(
+    conn: sqlite3.Connection,
+    match_id: int,
+    *,
+    actor: str,
+    ts: int | None = None,
+) -> Match:
+    """删掉一场比赛（后台的「删」半边，FR-C8-1）。
+
+    **已经有数据的比赛不许删**：采集会话、切片、报告、统计、灰信号任一存在即拒绝 ——
+    那些数据都挂在 `match_id` 上，删掉比赛行之后没人解释得清它们属于哪一场
+    （原始 JSONL 是账本，比赛行是它的出处）。
+    """
+    match = get_match(conn, match_id)
+    for table in ("room_sessions", "slices", "reports", "metrics", "gray_signals"):
+        count = int(
+            conn.execute(f"SELECT COUNT(*) AS n FROM {table} WHERE match_id=?", (match_id,)).fetchone()["n"]
+        )
+        if count:
+            raise ValueError(
+                f"比赛 #{match_id} 在 {table} 里还有 {count} 行数据，不能删除"
+                "（原始记录与报告都挂在它上面）"
+            )
+    conn.execute("DELETE FROM matches WHERE id=?", (match_id,))
+    conn.commit()
+    audit.record(
+        conn,
+        actor=actor,
+        action=ACTION_DELETE,
+        target=str(match_id),
+        detail={"league": match.league, "title": match.title, "state": match.state},
+        ts=ts,
+    )
+    return match
 
 
 def _to_match(row: sqlite3.Row) -> Match:
