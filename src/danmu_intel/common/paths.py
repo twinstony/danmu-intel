@@ -47,6 +47,15 @@ def raw_dir(platform: str, *, data_root: Path | None = None) -> Path:
     return (data_root or data_dir()) / "raw" / platform
 
 
+def archive_dir(*, data_root: Path | None = None) -> Path:
+    """归档根：NAS 共享的**挂载点**（设计 §6 的目录布局，ADR-0021）。
+
+    默认 `<data>/archive`；把 `ocean.local` 上的共享挂到这里即可，备份/副本策略
+    归 NAS 侧（本仓库不实现备份工具，NFR-A-5）。
+    """
+    return (data_root or data_dir()) / "archive"
+
+
 def raw_path(
     platform: str, room_id: str, ts_ms: int, *, tz: tzinfo | None = None, data_root: Path | None = None
 ) -> Path:

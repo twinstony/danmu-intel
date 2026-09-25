@@ -17,7 +17,7 @@ import time
 from dataclasses import asdict
 from pathlib import Path
 
-from danmu_intel.common import paths
+from danmu_intel.common import evidence, paths
 from danmu_intel.common.config import load_stats_config
 from danmu_intel.common.matches import get_match
 from danmu_intel.common.sources import SourceRef, verify
@@ -67,13 +67,18 @@ def load_segment_facts(conn: sqlite3.Connection, match_id: int) -> tuple[Segment
 
 
 def load_lines(conn: sqlite3.Connection, match_id: int, *, data_root: Path | None = None) -> list[RawLine]:
-    """读回该场比赛的全部原始弹幕，附带取证坐标（文件 + 行号）。"""
+    """读回该场比赛的全部原始弹幕，附带取证坐标（文件 + 行号）。
+
+    `rel_path` 用索引里的原值（可能在归档件上），位置由 `evidence.locate` 解析：
+    归档后重算统计因此仍成立（AC-13）。
+    """
     from danmu_intel.common.events import iter_events
 
     root = data_root or paths.data_dir()
     lines: list[RawLine] = []
     for segment in load_segment_facts(conn, match_id):
-        for line_no, event in iter_events(root / segment.rel_path):
+        path = evidence.locate(segment.rel_path, data_root=root)
+        for line_no, event in iter_events(path):
             lines.append(RawLine(rel_path=segment.rel_path, line_no=line_no, event=event))
     return lines
 

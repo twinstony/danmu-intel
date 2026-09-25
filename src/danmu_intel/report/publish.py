@@ -25,7 +25,7 @@ from typing import Mapping
 
 from danmu_intel.common import paths, paywall
 from danmu_intel.common.matches import get_match
-from danmu_intel.common.sources import SourceRef, compute_digest, file_digest, resolve
+from danmu_intel.common.sources import SourceRef, compute_digest, evidence_key, file_digest, resolve
 from danmu_intel.report.assemble import ReportContent
 from danmu_intel.report.forms import ReportForm, Timing, form_of
 from danmu_intel.report.html import render_report_html
@@ -160,6 +160,10 @@ def check_sources_resolvable(
     「封存哈希」来自 `danmu_segments`（采集会话落盘时记下的整文件摘要）。它是证据的
     锚点：组装报告时现算的区间摘要永远等于当前文件，只有拿封存值对比才查得出
     「原始记录被改动或追加」（AC-1 / AC-17 的溯源性守卫）。
+
+    来源引用冻结的是**生成那一刻的地址**（`raw/…jsonl`），而证据归档后索引行指向
+    `archive/…jsonl.zst`：`resolve` 找得到文件（解压后内容一致），封存值按**规范地址**
+    （`evidence_key`）对齐，所以归档不会让这道检查悄悄变成空转（ADR-0021）。
     """
     refs = _unique_sources(content)
     problems: list[str] = []
@@ -175,7 +179,7 @@ def check_sources_resolvable(
             continue
         if current != ref.sha256:
             problems.append(f"{ref.rel_path} 第 {ref.line_start}–{ref.line_end} 行在组装之后被改动")
-        recorded = (seals or {}).get(ref.rel_path)
+        recorded = (seals or {}).get(evidence_key(ref.rel_path))
         if recorded is not None and file_digest(path) != recorded:
             problems.append(f"{ref.rel_path} 与采集时封存的 SHA256 不一致（原始记录被改动或追加）")
     if problems:

@@ -19,7 +19,7 @@ from pathlib import Path
 from danmu_intel.collect.adapter import RoomKey
 from danmu_intel.collect.heartbeat import read_room_heartbeat
 from danmu_intel.collect.incidents import Notification, recent
-from danmu_intel.common import paths
+from danmu_intel.common import evidence, paths
 from danmu_intel.common.events import dedupe, iter_events
 
 NO_SESSION = "none"
@@ -186,7 +186,7 @@ def room_contribution(
     for row in segment_rows:
         key = (row["platform"], row["room_key"])
         bucket = events.setdefault(key, [])
-        for _, event in iter_events(root / row["rel_path"]):
+        for _, event in iter_events(evidence.locate(row["rel_path"], data_root=root)):
             bucket.append(event)
 
     contributions: list[RoomContribution] = []
