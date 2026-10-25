@@ -11,7 +11,7 @@
 ## 语言约定
 
 - 所有与用户的对话、生成的文档（spec / PRD / CONTEXT.md / ADR / 调研报告）、issue 正文与评论，一律使用**简体中文**。
-- 技术术语、GitHub issue 标签名（如 `ready-for-agent`、`needs-triage`）、代码标识符、CLI 命令保持英文原样。
+- 技术术语、GitHub issue 标签名（如 `ready-for-agent`、`needs-info`）、代码标识符、CLI 命令保持英文原样。
 - 任何 skill（grilling / research / to-spec / triage / wayfinder 等）在本项目中执行时，默认以简体中文进行，除非用户明确切换语言。
 
 ## Agent skills
@@ -22,7 +22,7 @@ Issues and PRDs live as GitHub issues, managed via the `gh` CLI. See `docs/agent
 
 ### Triage labels
 
-The five canonical triage labels, used as-is: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+The canonical triage labels: `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
 
 ### Domain docs
 
